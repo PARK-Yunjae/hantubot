@@ -1,0 +1,25 @@
+# Core
+python-dotenv
+PyYAML
+requests
+
+# Scheduling and Time
+holidays
+
+# GUI
+PySide6
+
+# Data Handling & Analysis
+pandas
+openpyxl
+ta
+pykrx
+
+# Web Scraping (for news, etc.)
+beautifulsoup4
+
+# Google Sheets Integration
+gspread
+gspread-dataframe
+google-auth-oauthlib
+google-generativeai

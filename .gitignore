@@ -1,0 +1,22 @@
+# IDE files
+.idea/
+.vscode/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Environment variables
+configs/.env
+configs/google_service_account.json
+
+# Logs and reports
+logs/
+reports/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info
+venv/
+.venv/

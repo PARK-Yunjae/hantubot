@@ -1,0 +1,97 @@
+# ==============================================================================
+# Hantubot 메인 설정 파일
+# ==============================================================================
+
+# [중요] 시스템 운영 모드
+# 'mock': 모의투자. 실제 돈이 오가지 않으며, KIS 모의투자 서버를 사용합니다.
+# 'live': 실전투자. 실제 돈으로 거래하며, KIS 실전투자 서버를 사용합니다.
+# GUI가 시작될 때 이 값을 참조하며, 실행 중에는 변경할 수 없습니다.
+mode: 'mock'
+
+# ------------------------------------------------------------------------------
+
+# API 관련 설정
+# 실제 키와 계좌번호는 보안을 위해 .env 파일에서 불러옵니다.
+api:
+  # .env 파일의 KIS_APP_KEY 값을 사용합니다.
+  app_key: ${KIS_APP_KEY}
+  # .env 파일의 KIS_APP_SECRET 값을 사용합니다.
+  app_secret: ${KIS_APP_SECRET}
+  # .env 파일의 KIS_ACCOUNT_NO 값을 사용합니다.
+  account_no: ${KIS_ACCOUNT_NO}
+  
+  # 실전/모의투자 API Base URL (일반적으로 수정할 필요 없음)
+  base_url:
+    live: "https://openapi.koreainvestment.com:9443"
+    mock: "https://openapivts.koreainvestment.com:29443"
+
+# ------------------------------------------------------------------------------
+
+# 거래 시간 설정 (한국 시간 기준)
+trading_hours:
+  # 정규장 시작 시간 (이 시간부터 거래 로직 활성화)
+  market_open: '09:00:00'
+  # 정규장 종료 시간 (이 시간 이후 모든 주문 불가)
+  market_close: '15:30:00'
+  # 종가 매매 로직 준비 시간 (장 마감 동시호가 시작 시간)
+  closing_call_start: '15:00:00' 
+
+# ------------------------------------------------------------------------------
+
+# 트레이딩 루프 설정
+# 메인 트레이딩 루프가 한 번의 사이클을 도는 주기 (초 단위)
+# 예: 60 -> 1분마다 시장을 확인하고 전략을 실행합니다.
+trading_loop_interval_seconds: 60
+
+# ------------------------------------------------------------------------------
+
+# 활성화할 전략 목록
+# hantubot/strategies/ 폴더 아래의 파이썬 파일명(확장자 제외)과 일치해야 합니다.
+# 여기에 추가된 전략만 TradingEngine이 로드하여 실행합니다.
+# 예:
+# active_strategies:
+#   - 'momentum_strategy'
+#   - 'mean_reversion_strategy'
+active_strategies:
+  - 'closing_price_advanced_screener'
+  # - 'opening_breakout_strategy'
+  # - 'volume_spike_strategy'
+
+# ------------------------------------------------------------------------------
+
+# 알림 설정
+notifications:
+  discord:
+    # Discord 알림 활성화 여부
+    enabled: true
+    # .env 파일의 DISCORD_WEBHOOK_URL 값을 사용합니다.
+    webhook_url: ${DISCORD_WEBHOOK_URL}
+  
+  slack:
+    # Slack 알림은 현재 구현되지 않았습니다.
+    enabled: false
+    token: ${SLACK_API_TOKEN}
+    channel: '#trading-alerts'
+
+# ------------------------------------------------------------------------------
+
+# 로깅 설정
+logging:
+  # 로그 레벨: DEBUG, INFO, WARNING, ERROR, CRITICAL 중 선택
+  # 'DEBUG': 가장 상세한 로그. 개발 시에만 사용 권장.
+  # 'INFO': 일반적인 시스템 운영 상태 로그. 운영 시 권장.
+  level: 'INFO' 
+  
+  # 로그 파일이 저장될 디렉토리 경로 (프로젝트 루트 기준)
+  directory: 'logs'
+
+# ------------------------------------------------------------------------------
+
+# 전략별 상세 설정
+strategy_settings:
+  closing_price_advanced_screener:
+    # true로 설정하면, 스크리닝된 1위 종목을 자동으로 매수합니다.
+    # false로 설정하면, Discord 알림만 보냅니다.
+    auto_buy_enabled: true
+    # 자동 매수 시 주문할 수량
+    buy_quantity: 1
