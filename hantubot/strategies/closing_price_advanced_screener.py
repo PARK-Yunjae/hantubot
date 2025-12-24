@@ -112,23 +112,46 @@ class ClosingPriceAdvancedScreener(BaseStrategy):
         
         return total_score, True, details
 
-    def _get_buffer_ratio(self) -> float:
+    def _get_buffer_ratio(self, stock_data: Dict[str, Any] = None) -> float:
         """
-        연속 승리 횟수에 따른 버퍼 비율 결정 (복리 극대화)
+        연속 승리 횟수 + 거래대금에 따른 버퍼 비율 결정 (복리 극대화)
+        
+        Args:
+            stock_data: 종목 데이터 (거래대금 정보 포함)
         
         Note: OrderManager가 시장가 주문 시 5% 슬리피지 버퍼를 추가하므로
         실제로는 여기서 설정한 비율보다 약간 더 보수적으로 작동함
         """
         consecutive_wins = self.dynamic_params.get('consecutive_wins', 0)
         
+        # 기본 버퍼 (연속 승리 기반)
         if consecutive_wins >= 5:
-            return 0.93  # 7% 버퍼 (매우 공격적)
+            base_buffer = 0.93  # 7% 버퍼 (매우 공격적)
         elif consecutive_wins >= 3:
-            return 0.92  # 8% 버퍼
+            base_buffer = 0.92  # 8% 버퍼
         elif consecutive_wins >= 2:
-            return 0.91  # 9% 버퍼
+            base_buffer = 0.91  # 9% 버퍼
         else:
-            return 0.90  # 10% 버퍼 (기본, 수수료+슬리피지 고려)
+            base_buffer = 0.90  # 10% 버퍼 (기본)
+        
+        # 거래대금 기반 추가 조정 (보수적)
+        if stock_data:
+            try:
+                # 거래대금 (단위: 원)
+                trading_value_str = stock_data.get('data_rank', '0')
+                trading_value = float(trading_value_str) if trading_value_str else 0
+                
+                # 거래대금 1000억 이상: +2% (대형 유동성)
+                if trading_value >= 100_000_000_000:  # 1000억
+                    base_buffer = min(0.95, base_buffer + 0.02)
+                # 거래대금 100억 이상: +1% (중형)
+                elif trading_value >= 10_000_000_000:  # 100억
+                    base_buffer = min(0.94, base_buffer + 0.01)
+                # 소형주는 그대로
+            except (ValueError, TypeError):
+                pass  # 오류 시 기본값 사용
+        
+        return base_buffer
 
     async def generate_signal(self, data_payload: Dict[str, Any], portfolio: Portfolio) -> List[Dict[str, Any]]:
         signals: List[Dict[str, Any]] = []
@@ -196,20 +219,29 @@ class ClosingPriceAdvancedScreener(BaseStrategy):
                 
                 df = df.sort_values(by='stck_bsop_date').reset_index(drop=True)
                 
-                # --- 1. 캔들 패턴 점수 (양봉이면 가산, 음봉이면 감점) ---
-                candle_score, is_bullish, candle_details = self._calculate_candle_score(df)
-                
-                # --- 2. 기본 데이터 추출 ---
+                # --- 1. 기본 데이터 추출 ---
                 current_price = df['stck_clpr'].iloc[-1]
                 sma20 = sma_indicator(df['stck_clpr'], window=self.sma_period).iloc[-1]
                 
-                # --- 3. CCI 계산 ---
+                # --- 2. CCI 계산 ---
                 try:
                     current_cci = cci(df['stck_hgpr'], df['stck_lwpr'], df['stck_clpr'], window=self.cci_period).iloc[-1]
                     if pd.isna(current_cci):
                         current_cci = 0
                 except (IndexError, ValueError):
                     current_cci = 0
+                
+                # ===== 필수 필터: 원칙에 맞지 않는 종목 사전 제거 =====
+                # 필터 1: 20일 이평선 위에 있어야 함
+                if pd.isna(sma20) or current_price <= sma20:
+                    continue
+                
+                # 필터 2: CCI 100 이상 (과매도 영역 탈출)
+                if current_cci < 100:
+                    continue
+                
+                # --- 3. 캔들 패턴 점수 (양봉이면 가산, 음봉이면 감점) ---
+                candle_score, is_bullish, candle_details = self._calculate_candle_score(df)
                 
                 # --- 4. ADX 계산 ---
                 try:
@@ -339,7 +371,9 @@ class ClosingPriceAdvancedScreener(BaseStrategy):
                 logger.warning(f"[{self.name}] {top_stock['name']}의 현재가가 0 이하여서 주문할 수 없습니다.")
                 return signals
             
-            buffer_ratio = self._get_buffer_ratio()
+            # 거래대금 정보를 포함하여 버퍼 계산
+            stock_data_for_buffer = next((s for s in top_volume_stocks if s.get('mksc_shrn_iscd') == top_stock['ticker']), None)
+            buffer_ratio = self._get_buffer_ratio(stock_data_for_buffer)
             order_amount = available_cash * buffer_ratio
             quantity = int(order_amount // current_price)
             
