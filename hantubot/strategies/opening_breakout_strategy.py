@@ -114,12 +114,11 @@ class OpeningBreakoutStrategy(BaseStrategy):
                     pnl = ((current_price / position['avg_price']) - 1) * 100
                     should_sell, reason = False, ""
 
+                    # 손익 기반 매도만 처리 (시간 기반 청산은 engine.py에서 처리)
                     if pnl >= 3.0:
                         should_sell, reason = True, f"익절 ({pnl:.2f}%)"
                     elif pnl <= -2.0:
                         should_sell, reason = True, f"손절 ({pnl:.2f}%)"
-                    elif now.time() > dt.time(9, 30) and pnl < 1.0:
-                        should_sell, reason = True, f"시간 기반 청산 ({now.strftime('%H:%M:%S')})"
                     
                     if should_sell:
                         logger.info(f"[{self.name}] {symbol} 매도 신호. 사유: {reason}")
@@ -163,7 +162,7 @@ class OpeningBreakoutStrategy(BaseStrategy):
                 if not (2.0 <= gap <= 7.0): continue
 
                 current_price = self.broker.get_current_price(symbol)
-                if current_price == 0 or current_price <= today_open_or_current: continue
+                if current_price == 0 or current_price <= today_open: continue
                 
                 # 분봉 거래량 급증 확인
                 prev_day_volume = float(prev_day['acml_vol'])
@@ -184,7 +183,8 @@ class OpeningBreakoutStrategy(BaseStrategy):
                 logger.info(f"[{self.name}] 진입 신호: {symbol}. 갭: {gap:.2f}%, 거래량 비율: {volume_spike_ratio:.1f}")
                 
                 available_cash = portfolio.get_cash()
-                order_amount = available_cash * 0.95
+                # [전수조사 수정] 시장가 주문 슬리피지 5% 버퍼 적용 (90% 사용)
+                order_amount = available_cash * 0.90
                 quantity = int(order_amount // current_price)
                 if quantity == 0: continue
 

@@ -100,9 +100,9 @@ class OrderManager:
             # 3. 포지션 및 잔고 검증
             if side == 'buy':
                 # [전수조사 수정] 중앙에서 "1종목 보유" 규칙 강제 적용
-                # if self._portfolio.get_positions():
-                #     logger.warning(f"[OrderManager] BUY signal for {symbol} ignored. A position is already held, adhering to one-stock-at-a-time rule.")
-                #     return
+                if self._portfolio.get_positions():
+                    logger.warning(f"[OrderManager] BUY signal for {symbol} ignored. A position is already held, adhering to one-stock-at-a-time rule.")
+                    return
 
                 # 시장가 주문일 경우 현재가를 조회하여 주문 금액 계산
                 effective_price = price
@@ -172,11 +172,18 @@ class OrderManager:
         strategy_id = original_order.get('strategy_id', 'unknown')
         current_regime = self._regime_manager.get_current_regime()
         pnl_pct = None
+        pnl_krw = None
         
         if side == 'sell':
             position_before_sale = self._portfolio.get_position(symbol)
             if position_before_sale and position_before_sale.get('avg_price', 0) > 0:
-                pnl_pct = ((fill_price / position_before_sale['avg_price']) - 1) * 100
+                avg_price = position_before_sale['avg_price']
+                pnl_pct = ((fill_price / avg_price) - 1) * 100
+                pnl_krw = (fill_price - avg_price) * filled_quantity
+                
+                # 실현 손익을 Broker에 등록 (일일 손실 한도 검사용)
+                self._broker.register_realized_pnl(pnl_krw)
+                logger.info(f"실현 손익 기록: {symbol}, PnL: {pnl_krw:,.0f}원 ({pnl_pct:.2f}%)")
 
         # 3. 포트폴리오 상태 업데이트 (가장 먼저 처리)
         self._portfolio.update_on_fill(fill_details)
@@ -193,6 +200,7 @@ class OrderManager:
             "strategy_id": strategy_id,
             "market_regime": current_regime,
             "pnl_pct": pnl_pct,
+            "pnl_krw": pnl_krw, # PnL 원화 값 추가
         }
         trade_logger.log_trade_record(trade_record)
 
@@ -212,18 +220,32 @@ if __name__ == '__main__':
                 'strategy_id': kwargs.get('strategy_id', 'test_strat'),
                 **kwargs
             }
+        
+        def get_current_price(self, symbol):
+            """Mock 현재가 조회"""
+            return 75000
+        
+        def register_realized_pnl(self, pnl_krw):
+            """Mock PnL 등록"""
+            logger.info(f"[MockBroker] Registering realized PnL: {pnl_krw:,.0f}원")
 
     # --- Test Setup ---
     config_path = "configs/config.yaml"
     mock_broker = MockBroker()
     portfolio = Portfolio(initial_cash=20_000_000)
     clock = MarketClock(config_path=config_path)
+    regime_manager = RegimeManager()  # 추가
 
     def force_market_open():
         return True
     clock.is_market_open = force_market_open
 
-    order_manager = OrderManager(broker=mock_broker, portfolio=portfolio, clock=clock)
+    order_manager = OrderManager(
+        broker=mock_broker, 
+        portfolio=portfolio, 
+        clock=clock,
+        regime_manager=regime_manager  # 추가
+    )
 
     # --- Test Scenarios ---
     print("\n--- Scenario 1: Valid BUY signal ---")

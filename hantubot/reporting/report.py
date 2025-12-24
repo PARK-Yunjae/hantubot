@@ -63,22 +63,23 @@ class ReportGenerator:
             # Pandas의 숫자 타입을 float으로 통일
             fills['filled_quantity'] = pd.to_numeric(fills['filled_quantity'], errors='coerce')
             fills['fill_price'] = pd.to_numeric(fills['fill_price'], errors='coerce')
+            fills['pnl_krw'] = pd.to_numeric(fills['pnl_krw'], errors='coerce').fillna(0) # pnl_krw 추가
 
             buys = fills[fills['side'] == 'buy']
             sells = fills[fills['side'] == 'sell']
             
             total_buy_value = (buys['filled_quantity'] * buys['fill_price']).sum()
             total_sell_value = (sells['filled_quantity'] * sells['fill_price']).sum()
+            total_realized_pnl_krw = sells['pnl_krw'].sum() # 실현 손익 합계
             
             num_buy_trades = len(buys)
             num_sell_trades = len(sells)
             
-            # 참고: 정확한 손익(P/L) 계산은 매수-매도 거래를 페어링해야 하므로 복잡합니다.
-            # 여기서는 간단한 요약 정보만 제공합니다.
             summary_text = (
                 f"- 총 체결 건수: **{len(fills)}** 건\n"
                 f"- 매수 체결: {num_buy_trades} 건 (총 {total_buy_value:,.0f} 원)\n"
                 f"- 매도 체결: {num_sell_trades} 건 (총 {total_sell_value:,.0f} 원)\n"
+                f"- 실현 손익: **{total_realized_pnl_krw:,.0f}** 원\n" # PnL 추가
             )
 
         # --- 리포트 생성 ---
@@ -93,7 +94,7 @@ class ReportGenerator:
 """
         if not fills.empty:
             # 리포트에 포함할 컬럼 선택 및 순서 지정
-            display_columns = ['timestamp', 'symbol', 'side', 'filled_quantity', 'fill_price', 'order_id']
+            display_columns = ['timestamp', 'symbol', 'side', 'filled_quantity', 'fill_price', 'pnl_krw', 'order_id'] # pnl_krw 추가
             report_md += fills[display_columns].to_markdown(index=False)
         else:
             report_md += "\n체결 내역 없음."
@@ -108,7 +109,7 @@ class ReportGenerator:
         # --- 알림 전송 ---
         discord_embed = {
             "title": f"📈 일일 리포트 ({today_str})",
-            "description": summary_text,
+            "description": summary_text, # pnl_krw가 포함된 summary_text 사용
             "color": 5814783, # Blue
             "footer": {"text": "상세 내용은 저장된 마크다운 리포트를 확인하세요."}
         }

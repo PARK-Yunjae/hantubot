@@ -6,7 +6,7 @@
 # 'mock': 모의투자. 실제 돈이 오가지 않으며, KIS 모의투자 서버를 사용합니다.
 # 'live': 실전투자. 실제 돈으로 거래하며, KIS 실전투자 서버를 사용합니다.
 # GUI가 시작될 때 이 값을 참조하며, 실행 중에는 변경할 수 없습니다.
-mode: 'mock'
+mode: 'live'
 
 # ------------------------------------------------------------------------------
 
@@ -125,14 +125,14 @@ strategy_settings:
         rank_jump_buy_threshold: 15 # 순위권 밖(>35)에 있던 종목이 이 순위 안으로 들어오면 매수
         rank_jump_prev_threshold: 35
         rank_sell_threshold: 40     # 보유 종목이 이 순위 밖으로 밀려나면 매도
-        max_positions: 2            # 이 전략으로 보유할 수 있는 최대 종목 수
+        max_positions: 1            # [전수조사 수정] 1종목 복리 전략을 위해 1로 통일
         trade_enabled: true         # 이 레짐에서 거래 활성화
       NEUTRAL: # 횡보장 (기본 기준)
         name: "중립장 모드 (표준 매매)"
         take_profit_pct: 2.0
         stop_loss_pct: -2.0
-        rank_jump_buy_threshold: 100 # 테스트용: 10 -> 100
-        rank_jump_prev_threshold: 101 # 테스트용: 30 -> 101
+        rank_jump_buy_threshold: 10 # 순위권 밖(>35)에 있던 종목이 이 순위 안으로 들어오면 매수
+        rank_jump_prev_threshold: 30
         rank_sell_threshold: 30
         max_positions: 1
         trade_enabled: true
@@ -148,11 +148,28 @@ strategy_settings:
         
 # ------------------------------------------------------------------------------
 
+# ------------------------------------------------------------------------------
+
+# 리스크 관리 설정 (실전 투자 전용 안전 장치)
+risk_management:
+  # 1회 주문 최대 금액 (원). 이 금액을 초과하는 주문은 거부됩니다.
+  max_order_value_krw: 999999999 # 가용 현금 100% 사용을 위해 매우 큰 값으로 설정
+  # 하루 동안의 누적 최대 매수 금액 (원). 이 금액을 초과하면 더 이상 매수 주문이 나가지 않습니다.
+  max_daily_order_value_krw: 999999999 # 일일 제한 해제를 위해 매우 큰 값으로 설정
+  # 하루 동안의 최대 실현 손실 금액 (원). 이 금액을 초과하면 모든 거래가 중단됩니다.
+  max_daily_realized_loss_krw: 999999999 # 테스트를 위해 일일 손실 제한 해제
+  # 긴급 정지 스위치. true로 설정 시 모든 주문이 거부됩니다.
+  emergency_stop: false
+  # 주문 처리 중 에러 발생 시 시스템을 즉시 중단할지 여부.
+  halt_on_error: true
+
+# ------------------------------------------------------------------------------
+
 # 테스트 전용 설정 (주의: 실전 투자 시에는 모두 false 또는 주석 처리)
 testing:
   # true일 경우, 아래에 지정된 전략/종목으로 1회성 가짜 매수 신호를 발생시켜
   # 전체 매매 파이프라인(주문->체결->로깅)을 테스트합니다.
-  force_signal_enabled: true
+  force_signal_enabled: false
   
   # 가짜 신호를 발생시킬 전략의 ID
   force_signal_strategy_id: 'volume_spike_strategy'

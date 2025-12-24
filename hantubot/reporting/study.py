@@ -10,7 +10,7 @@ import pandas as pd
 from google.oauth2.service_account import Credentials
 from gspread_dataframe import set_with_dataframe
 from pykrx import stock
-import google.genai as genai # Deprecation warning is noted, this is the modern convention.
+import google.generativeai as genai  # 안정 버전 사용
 
 from .logger import get_logger
 
@@ -39,7 +39,8 @@ def get_batch_summaries_with_gemini(stocks_to_summarize: List[Dict]) -> Dict[str
             return summaries
 
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        # 무료 티어에서 사용 가능한 최신 안정 모델
+        model = genai.GenerativeModel('gemini-2.0-flash')
         
         # Build a single prompt for all stocks
         stock_list_str = "\n".join([f"- {s['name']} ({s['ticker']})" for s in stocks_to_summarize])
@@ -59,15 +60,28 @@ def get_batch_summaries_with_gemini(stocks_to_summarize: List[Dict]) -> Dict[str
         response = model.generate_content(prompt)
         
         # Clean up and parse the JSON response
-        cleaned_response = response.text.strip().replace("```json", "").replace("```", "").strip()
-        json_response = json.loads(cleaned_response)
-
-        # Gemini might return summaries for different tickers, so we update our dict safely
-        for ticker, summary in json_response.items():
-            if ticker in summaries:
-                summaries[ticker] = summary
+        response_text = response.text.strip()
         
-        logger.info(f"Successfully generated summaries for {len(json_response)} stocks in a single batch call.")
+        # Remove markdown code blocks
+        response_text = response_text.replace("```json", "").replace("```", "").strip()
+        
+        # Find JSON content (sometimes Gemini adds extra text)
+        start_idx = response_text.find('{')
+        end_idx = response_text.rfind('}')
+        
+        if start_idx != -1 and end_idx != -1:
+            json_text = response_text[start_idx:end_idx+1]
+            json_response = json.loads(json_text)
+            
+            # Gemini might return summaries for different tickers, so we update our dict safely
+            for ticker, summary in json_response.items():
+                if ticker in summaries:
+                    summaries[ticker] = summary
+            
+            logger.info(f"Successfully generated summaries for {len(json_response)} stocks in a single batch call.")
+        else:
+            logger.warning("Gemini 응답에서 JSON을 찾을 수 없습니다.")
+        
         return summaries
 
     except Exception as e:
@@ -92,9 +106,14 @@ def get_worksheet_or_create(spreadsheet: gspread.Spreadsheet, name: str):
         return spreadsheet.add_worksheet(title=name, rows=1, cols=1)
 
 # --- Main Study Logic ---
-def run_daily_study(broker, notifier):
+def run_daily_study(broker, notifier, force_run=False):
     """
     "100일 공부" 리서치 루틴: Google Sheets & Gemini API 완전 자동화 버전
+    
+    Args:
+        broker: 브로커 인스턴스
+        notifier: 알림 인스턴스
+        force_run: True면 중복 체크 무시하고 강제 실행
     """
     logger.info("Running daily study: Fully Automated GSheet + Gemini Edition...")
     today_str = datetime.now().strftime("%Y%m%d")
@@ -107,7 +126,7 @@ def run_daily_study(broker, notifier):
         log_ws = get_worksheet_or_create(spreadsheet, "DailyLog")
         
         existing_df = pd.DataFrame(log_ws.get_all_records())
-        if not existing_df.empty and today_date_str_for_check in existing_df['날짜'].values:
+        if not force_run and not existing_df.empty and today_date_str_for_check in existing_df['날짜'].values:
             logger.info(f"Today's study for {today_date_str_for_check} has already been completed. Skipping.")
             return
 
@@ -161,24 +180,18 @@ def run_daily_study(broker, notifier):
             
             company_summary = all_summaries.get(ticker, "요약 없음.")
             
-            pbr, per = 'N/A', 'N/A'
-            if ticker in df_funda.index:
-                fundamentals = df_funda.loc[ticker]
-                pbr = fundamentals.get('PBR', 'N/A')
-                per = fundamentals.get('PER', 'N/A')
-            
             reason = ", ".join([r for r, c in [("거래량천만", stock_info['거래량'] >= 10_000_000), ("상한가", stock_info['등락률'] >= 29.0)] if c])
 
+            # 간소화된 컬럼 (재무지표 제외)
             daily_records.append({
                 "날짜": today_date_str_for_check,
                 "종목코드": ticker,
                 "종목명": stock_name,
                 "선정사유": reason,
-                "종가": stock_info['종가'],
+                "종가": f"{stock_info['종가']:,}",
                 "등락률": f"{stock_info['등락률']:.2f}%",
+                "거래량": f"{stock_info['거래량']:,}",
                 "기업개요": company_summary,
-                "PBR": pbr,
-                "PER": per,
             })
         except Exception as e:
             logger.error(f"Failed to process {ticker} for GSheet: {e}")
@@ -200,12 +213,28 @@ def run_daily_study(broker, notifier):
 
         set_with_dataframe(log_ws, combined_df, include_index=False, resize=True)
         logger.info(f"Appended {len(new_df)} new records to 'DailyLog' worksheet.")
+        
+        # 자동 열 너비 조정 (내용에 맞게)
+        try:
+            # 모든 열에 대해 자동 크기 조정 요청
+            num_cols = len(combined_df.columns)
+            log_ws.columns_auto_resize(0, num_cols - 1)
+            logger.info("열 너비 자동 조정 완료.")
+        except Exception as e:
+            logger.warning(f"열 너비 자동 조정 실패 (무시 가능): {e}")
 
         # Update Frequency Analysis using Korean column name
         freq_counts = combined_df['종목명'].value_counts().reset_index()
         freq_counts.columns = ['종목명', '등장횟수']
         set_with_dataframe(freq_ws, freq_counts, include_index=False, resize=True)
         logger.info("Updated 'Frequency_Analysis' worksheet.")
+        
+        # Frequency 시트도 자동 크기 조정
+        try:
+            freq_ws.columns_auto_resize(0, 1)
+            logger.info("Frequency 시트 열 너비 자동 조정 완료.")
+        except Exception as e:
+            logger.warning(f"Frequency 시트 열 너비 자동 조정 실패 (무시 가능): {e}")
 
         summary_fields = [{"name": f"- {rec['종목명']} ({rec['종목코드']})", "value": f"이유: {rec['선정사유']}", "inline": False} for rec in daily_records[:5]]
         embed = {"title": f"📝 유목민 공부법 리포트 -> GSheet 저장 완료", "description": f"금일의 관심 종목 **{len(daily_records)}개**가 자동 요약과 함께 Google Sheet에 저장되었습니다.", "color": 5814783, "fields": summary_fields}

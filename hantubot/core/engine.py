@@ -106,6 +106,13 @@ class TradingEngine:
                     await asyncio.sleep(15)
                     continue
                 
+                # 동시호가 시간(15:20-15:30)에는 체결 조회 API가 작동하지 않으므로 건너뜀
+                now = dt.datetime.now()
+                if now.hour == 15 and 20 <= now.minute < 30:
+                    logger.debug("동시호가 시간(15:20-15:30)입니다. 체결 조회를 건너뜁니다.")
+                    await asyncio.sleep(15)
+                    continue
+                
                 concluded_orders = self.broker.get_concluded_orders()
                 
                 for fill in concluded_orders:
@@ -124,10 +131,64 @@ class TradingEngine:
                     self.order_manager.handle_fill_update(fill)
                     self._processed_fill_ids.add(execution_id)
                     
-                    self.notifier.send_alert(
-                        f"주문 체결: {fill['side'].upper()} {fill['symbol']} {int(fill['filled_quantity'])}주 @ {float(fill['fill_price']):,.0f}원",
-                        level='info'
-                    )
+                    # 상세 체결 알림 생성
+                    side = fill['side']
+                    symbol = fill['symbol']
+                    quantity = int(fill['filled_quantity'])
+                    price = float(fill['fill_price'])
+                    total_amount = quantity * price
+                    
+                    # 종목명 조회
+                    try:
+                        from pykrx import stock
+                        stock_name = stock.get_market_ticker_name(symbol)
+                    except:
+                        stock_name = symbol
+                    
+                    # 매수/매도 구분
+                    if side == 'buy':
+                        emoji = "💰"
+                        color = 5763719  # 파란색
+                        title = f"✅ 매수 체결: {stock_name} ({symbol})"
+                    else:
+                        emoji = "💵"
+                        color = 15844367  # 빨간색
+                        title = f"✅ 매도 체결: {stock_name} ({symbol})"
+                    
+                    # 현재 포트폴리오 상태
+                    current_cash = self.portfolio.get_cash()
+                    positions = self.portfolio.get_positions()
+                    
+                    # 필드 구성
+                    fields = [
+                        {"name": "체결 수량", "value": f"{quantity:,}주", "inline": True},
+                        {"name": "체결 가격", "value": f"{price:,.0f}원", "inline": True},
+                        {"name": "체결 금액", "value": f"{total_amount:,.0f}원", "inline": True},
+                    ]
+                    
+                    # 매도 시 수익률 정보 추가
+                    if side == 'sell':
+                        original_order = self.portfolio._open_orders.get(fill.get('order_id'), {})
+                        # 이전에 계산된 PnL 정보 활용
+                        position_info = ""
+                        if positions:
+                            for sym, pos in positions.items():
+                                position_info += f"▪️ {sym}: {pos['quantity']}주\n"
+                        else:
+                            position_info = "없음 (전부 청산)"
+                        
+                        fields.append({"name": "현재 보유 종목", "value": position_info or "없음", "inline": False})
+                    
+                    fields.append({"name": "현금 잔고", "value": f"{current_cash:,.0f}원", "inline": False})
+                    
+                    embed = {
+                        "title": title,
+                        "color": color,
+                        "fields": fields,
+                        "footer": {"text": f"체결 시간: {dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"}
+                    }
+                    
+                    self.notifier.send_alert(f"{emoji} {title}", embed=embed)
             
             except Exception as e:
                 logger.error(f"Error in fill polling task: {e}", exc_info=True)
@@ -184,28 +245,80 @@ class TradingEngine:
         return payload
 
     async def _process_market_open_logic(self):
-        """장 시작 (09:00) 시 실행될 로직. 종가매매 및 고아 포지션을 청산합니다."""
+        """장 시작 (09:00) 시 실행될 로직. 모든 보유 포지션을 시초가에 청산합니다."""
         logger.info("장 시작! 시초가 청산 로직을 실행합니다.")
         
-        positions_to_sell = []
-        for symbol, position in self.portfolio.get_positions().items():
-            strategy_id = position.get('strategy_id', '')
-            if 'closing_price' in strategy_id or strategy_id == 'loaded_on_startup':
-                positions_to_sell.append(position)
-                logger.info(f"시초가 매도 대상 발견: {symbol} (사유: {strategy_id})")
-
-        if positions_to_sell:
-            for pos in positions_to_sell:
+        positions = self.portfolio.get_positions()
+        
+        if positions:
+            for symbol, position in positions.items():
+                strategy_id = position.get('strategy_id', 'unknown')
+                logger.info(f"시초가 매도 대상: {symbol} (전략: {strategy_id})")
+                
                 sell_signal = {
                     'strategy_id': 'market_open_liquidation', 
-                    'symbol': pos['symbol'], 
+                    'symbol': position['symbol'], 
                     'side': 'sell', 
-                    'quantity': pos['quantity'], 
-                    'price': 0, 'order_type': 'market'
+                    'quantity': position['quantity'], 
+                    'price': 0, 
+                    'order_type': 'market'
                 }
                 self.order_manager.process_signal(sell_signal)
+            
+            logger.info(f"시초가에 {len(positions)}개 포지션 청산 신호 생성 완료.")
         else:
             logger.info("시초가에 청산할 포지션이 없습니다.")
+    
+    async def _check_forced_liquidation(self):
+        """
+        전략별 시간대 강제 청산 로직 (우선 처리)
+        
+        시간대 종료 1분 전부터 청산하여 시간 넘어가는 일 방지
+        """
+        now = dt.datetime.now()
+        positions = self.portfolio.get_positions()
+        
+        if not positions:
+            return False  # 청산할 것이 없음
+        
+        liquidated = False
+        
+        for symbol, position in list(positions.items()):
+            strategy_id = position.get('strategy_id', '')
+            
+            # opening_breakout_strategy: 09:29부터 청산 시작
+            if 'opening_breakout' in strategy_id:
+                # 09:29 이상이면 청산 (1분 전부터 시작)
+                if (now.hour == 9 and now.minute >= 29) or now.hour > 9:
+                    logger.warning(f"[우선 청산] {symbol} - opening_breakout 시간 종료 임박 (09:30)")
+                    sell_signal = {
+                        'strategy_id': 'forced_liquidation_0930',
+                        'symbol': symbol,
+                        'side': 'sell',
+                        'quantity': position['quantity'],
+                        'price': 0,
+                        'order_type': 'market'
+                    }
+                    self.order_manager.process_signal(sell_signal)
+                    liquidated = True
+            
+            # volume_spike_strategy: 14:59부터 청산 시작
+            elif 'volume_spike' in strategy_id:
+                # 14:59 이상이면 청산
+                if (now.hour == 14 and now.minute >= 59) or now.hour >= 15:
+                    logger.warning(f"[우선 청산] {symbol} - volume_spike 시간 종료 임박 (15:00)")
+                    sell_signal = {
+                        'strategy_id': 'forced_liquidation_1500',
+                        'symbol': symbol,
+                        'side': 'sell',
+                        'quantity': position['quantity'],
+                        'price': 0,
+                        'order_type': 'market'
+                    }
+                    self.order_manager.process_signal(sell_signal)
+                    liquidated = True
+        
+        return liquidated  # 청산 실행 여부 반환
 
     async def _run_strategies(self, data_payload: Dict, closing_call: bool = False):
         """주어진 데이터로 적절한 시점의 전략을 실행하고 신호를 처리합니다."""
@@ -270,7 +383,10 @@ class TradingEngine:
 
         # 2. "100일 공부" 자동화 루틴 실행
         try:
-            run_daily_study(broker=self.broker, notifier=self.notifier)
+            # 장 마감 후 1시간 이내 재실행이면 강제 실행 (force_run=True)
+            now = dt.datetime.now()
+            force_run = now.hour <= 16 and now.minute <= 30  # 16:30까지는 강제 실행
+            run_daily_study(broker=self.broker, notifier=self.notifier, force_run=force_run)
         except Exception as e:
             logger.error(f"데일리 스터디 자료 생성 실패: {e}", exc_info=True)
             self.notifier.send_alert("데일리 스터디 자료 생성 중 오류가 발생했습니다.", level='error')
@@ -300,9 +416,21 @@ class TradingEngine:
                     post_market_run_today = False
                     logger.debug("장이 열려있습니다. 전략 실행 준비 중.")
                     
+                    # 09:00 장 시작 시 모든 포지션 청산 (최우선 처리)
                     if now.hour == 9 and now.minute == 0:
                         await self._process_market_open_logic()
+                        # 청산 후 3초 대기 (체결 처리 시간)
+                        await asyncio.sleep(3)
                     
+                    # 전략별 시간대 강제 청산 체크 (우선 처리)
+                    liquidated = await self._check_forced_liquidation()
+                    if liquidated:
+                        logger.info("⚠️ 강제 청산 실행됨. 전략 실행 건너뜀 (청산 우선).")
+                        # 청산 후 3초 대기하고 다음 루프로
+                        await asyncio.sleep(3)
+                        continue  # 전략 실행 건너뛰고 다음 루프로
+                    
+                    # 청산이 없을 때만 전략 실행
                     logger.debug("데이터 페이로드 준비 중...")
                     data_payload = await self._prepare_data_payload()
                     logger.debug("데이터 페이로드 준비 완료. 전략 실행 중...")

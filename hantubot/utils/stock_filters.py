@@ -15,6 +15,7 @@ def is_eligible_stock(stock_name: str) -> bool:
 
     # 제외할 키워드 목록
     # 대소문자 구분을 위해 일부는 원본, 일부는 대문자로 확인
+    # [전수조사 수정] 채권 관련 키워드 추가
     exclusion_keywords = [
         "스팩",
         "리츠",
@@ -22,6 +23,11 @@ def is_eligible_stock(stock_name: str) -> bool:
         "레버리지",
         "선물",
         " ETN", # ETN은 보통 'SOL ETN' 처럼 앞에 공백이 있음
+        "채권",
+        "국고채",
+        "회사채",
+        "전환사채",
+        "신주인수권",
     ]
 
     if "ETF" in name_upper:

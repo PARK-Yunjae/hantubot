@@ -34,8 +34,12 @@ class Broker:
         self._pykrx_cache: List[Dict] = []
         self._pykrx_cache_time: Optional[dt.datetime] = None
         
-        # 모의투자용 가짜 체결 데이터 큐
-        self._mock_fill_queue: List[Dict] = []
+        # 리스크 관리 설정 로드 및 일일 지표 초기화
+        self._risk_config = config.get('risk_management', {})
+        self._daily_order_value_krw = 0.0 # 금일 누적 매수 금액
+        self._daily_realized_loss_krw = 0.0 # 금일 누적 실현 손실
+        self._last_reset_date = dt.date.today() # 일일 지표 리셋을 위한 날짜
+        self._has_error_occurred = False # 심각한 에러 발생 여부 플래그
 
         logger.info(f"Broker initialized for {'MOCK' if is_mock else 'LIVE'} trading. Account: {self.ACCOUNT_NO}")
 
@@ -101,6 +105,7 @@ class Broker:
             "appkey": self._APP_KEY,
             "appsecret": self._APP_SECRET,
             "tr_id": tr_id,
+            "custtype": "P", # 개인 고객 유형 추가
         }
         if hashkey:
             headers["hashkey"] = hashkey
@@ -133,7 +138,17 @@ class Broker:
                         logger.warning("토큰 관련 오류 감지. 토큰 갱신 후 재시도.")
                         self._issue_new_token()
                         continue
-                    logger.error(f"API 오류 (tr_id: {tr_id}): {data}")
+                    masked_headers = headers.copy()
+                    if 'authorization' in masked_headers:
+                        masked_headers['authorization'] = 'Bearer ***MASKED***'
+                    if 'appsecret' in masked_headers:
+                        masked_headers['appsecret'] = '***MASKED***'
+                    
+                    logger.error(f"API 오류 (tr_id: {tr_id}): {data}\n"
+                                 f"  응답 상태 코드: {resp.status_code}\n"
+                                 f"  응답 본문: {resp.text}\n"
+                                 f"  요청 URL: {full_url}\n"
+                                 f"  요청 헤더: {masked_headers}")
                     return data
                 
                 return data
@@ -144,12 +159,14 @@ class Broker:
                 # 404 에러는 재시도하지 않고 즉시 실패 처리
                 if e.response is not None and e.response.status_code == 404:
                     logger.critical(f"API 경로를 찾을 수 없습니다 (404 Not Found): {full_url}")
+                    self._has_error_occurred = True
                     break
                 
-                logger.error(f"HTTP 요청 실패: {e}. 재시도... ({attempt + 1}/{max_retries})")
+                logger.error(f"HTTP 요청 실패: {e}. 재시도... ({attempt + 1}/{max_retries})", exc_info=True)
                 time.sleep(0.5)
 
         logger.critical(f"API 요청이 {max_retries}번의 재시도 후에도 최종 실패했습니다: {full_url}")
+        self._has_error_occurred = True
         return {}
 
     def get_current_price(self, symbol: str) -> float:
@@ -226,11 +243,17 @@ class Broker:
         url_path = "/uapi/domestic-stock/v1/quotations/volume-rank"
         tr_id = "FHPST01710000"
         params = {
-            "FID_COND_MRKT_DIV_CODE": "J", "FID_COND_SCR_NO": "20171",
-            "FID_INPUT_ISCD": "0000", "FID_DIV_CLS_CODE": "0",
-            "FID_BLNG_CLS_CODE": "0", "FID_TRC_CLS_CODE": "0",
-            "FID_ETC_CLS_CODE": "", "FID_VOL_CNT": str(top_n),
-            "FID_INPUT_PRICE_1": "", "FID_INPUT_PRICE_2": "", "FID_INPUT_DATE_1": ""
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_COND_SCR_DIV_CODE": "20171",
+            "FID_INPUT_ISCD": "0000",
+            "FID_DIV_CLS_CODE": "0",
+            "FID_BLNG_CLS_CODE": "0",
+            "FID_TRGT_CLS_CODE": "111111111",
+            "FID_TRGT_EXLS_CLS_CODE": "000000",
+            "FID_INPUT_PRICE_1": "0",
+            "FID_INPUT_PRICE_2": "0",
+            "FID_VOL_CNT": "0",
+            "FID_INPUT_DATE_1": "0"
         }
         data = self._request("GET", url_path, tr_id, params=params)
         
@@ -240,6 +263,17 @@ class Broker:
         msg = data.get('msg1', '알 수 없는 오류')
         logger.error(f"거래량 상위 조회 실패: {msg}")
         return []
+
+    def get_realtime_transaction_ranks(self, top_n: int = 30) -> list:
+        """
+        실시간 거래대금 상위 종목을 조회합니다.
+        get_volume_leaders()와 동일한 기능을 수행하는 별칭 함수입니다.
+        ClosingPriceAdvancedScreener 전략에서 사용됩니다.
+        
+        :param top_n: 조회할 종목 수 (기본값: 30)
+        :return: 거래량/거래대금 상위 종목 목록
+        """
+        return self.get_volume_leaders(top_n=top_n)
 
     def get_historical_daily_data(self, symbol: str, days: int = 60) -> list:
         """
@@ -355,6 +389,34 @@ class Broker:
         else: tick = 1000
         return (price // tick) * tick
 
+    def _check_and_reset_daily_metrics(self):
+        """
+        매일 자정마다 일일 누적 지표들을 초기화합니다.
+        """
+        today = dt.date.today()
+        if today > self._last_reset_date:
+            logger.info(f"일일 지표 초기화 (이전 날짜: {self._last_reset_date}, 오늘 날짜: {today})")
+            self._daily_order_value_krw = 0.0
+            self._daily_realized_loss_krw = 0.0
+            self._last_reset_date = today
+            # 에러 플래그도 매일 초기화
+            self._has_error_occurred = False
+
+    def register_realized_pnl(self, pnl_krw: float):
+        """
+        매도 체결 시 발생한 실현 손익을 기록하고 일일 손실 한도를 확인합니다.
+        """
+        self._check_and_reset_daily_metrics() # 날짜가 바뀌었으면 초기화
+        
+        self._daily_realized_loss_krw += pnl_krw
+        max_daily_loss = self._risk_config.get('max_daily_realized_loss_krw')
+
+        if max_daily_loss is not None and self._daily_realized_loss_krw < -max_daily_loss:
+            logger.critical(f"일일 누적 실현 손실이 한도를 초과했습니다! ({self._daily_realized_loss_krw:,}원 < -{max_daily_loss:,}원)")
+            logger.critical("긴급 정지 스위치를 강제로 활성화합니다. 모든 거래가 중단됩니다.")
+            self._risk_config['emergency_stop'] = True # config 자체를 수정
+
+
     def place_order(self, symbol: str, side: str, quantity: int, price: float, order_type: str) -> Optional[Dict]:
         """매수/매도 주문을 전송합니다."""
         # --- 최종 방어: 수량 ---
@@ -369,14 +431,52 @@ class Broker:
         if quantity <= 0:
             logger.error(f"주문 거부: 수량 0 이하 ({symbol}) qty={quantity}")
             return None
+        
+        # --- 리스크 관리 가드 시작 ---
+        # 긴급 정지 스위치 확인
+        if self._risk_config.get('emergency_stop', False):
+            logger.warning(f"긴급 정지 스위치 활성화로 인해 주문 거부됨 ({side} {symbol} {quantity}주)")
+            return None
+
+        # 에러 발생 시 주문 중단 설정 확인
+        if self._risk_config.get('halt_on_error', False) and getattr(self, '_has_error_occurred', False):
+            logger.warning(f"이전 에러 발생으로 인해 주문 거부됨 (halt_on_error 활성화) ({side} {symbol} {quantity}주)")
+            return None
+
+        # 주문 금액 검증 (매수 주문에만 적용)
+        if side.lower() == 'buy':
+            if order_type.lower() == 'limit':
+                if price <= 0:
+                    logger.error(f"지정가 매수 주문({symbol})은 0원 이하일 수 없습니다. 주문 거부됨.")
+                    return None
+                order_value = price * quantity
+            else: # market order
+                # 시장가 매수 주문 시 현재가를 가져와 주문 금액을 추정
+                current_price = self.get_current_price(symbol)
+                if current_price <= 0:
+                    logger.error(f"시장가 매수 주문({symbol})의 현재가를 가져올 수 없어 주문 거부됨.")
+                    return None
+                order_value = current_price * quantity
+            
+            max_order_value = self._risk_config.get('max_order_value_krw')
+            if max_order_value and order_value > max_order_value:
+                logger.warning(f"1회 주문 최대 금액 초과로 주문 거부됨 ({symbol}, 주문 금액: {order_value:,}원, 최대: {max_order_value:,}원)")
+                return None
+            
+            # 일일 누적 매수 금액 확인
+            max_daily_order_value = self._risk_config.get('max_daily_order_value_krw')
+            if max_daily_order_value:
+                self._check_and_reset_daily_metrics()
+                if (self._daily_order_value_krw + order_value) > max_daily_order_value:
+                    logger.warning(f"일일 누적 매수 금액 초과로 주문 거부됨 ({symbol}, 예상 누적: {self._daily_order_value_krw + order_value:,}원, 최대: {max_daily_order_value:,}원)")
+                    return None
+        # --- 리스크 관리 가드 종료 ---
             
         if side.lower() not in ['buy', 'sell']:
             raise ValueError("side는 'buy' 또는 'sell'이어야 합니다.")
         
         if order_type.lower() == 'limit':
-            if price <= 0:
-                logger.error(f"지정가 주문({symbol})은 0원 이하일 수 없습니다. 주문 거부됨.")
-                return None
+            # `price <= 0` 체크는 이미 리스크 관리 가드에서 처리됨
             # --- 호가 단위 정규화 ---
             normalized_price = self._normalize_tick_price(int(price))
             if normalized_price != int(price):
@@ -421,23 +521,6 @@ class Broker:
 
             logger.info(f"주문 성공: {side} {symbol} {quantity}주 @ {price if price > 0 else '시장가'}. 주문 ID: {order_id}")
             
-            # 모의투자 모드일 경우, 즉시 체결을 시뮬레이션하고 큐에 추가
-            if self.IS_MOCK:
-                logger.info(f"[모의] 주문 ID {order_id}에 대한 즉시 체결을 시뮬레이션합니다.")
-                # 시장가 주문이면 현재가를 가져와 체결가로 사용
-                fill_price = price if price > 0 else self.get_current_price(symbol)
-                
-                fake_fill = {
-                    "execution_id": f"{order_id}-01", # 가상 실행 ID
-                    "order_id": order_id,
-                    "symbol": symbol,
-                    "side": side,
-                    "filled_quantity": quantity,
-                    "fill_price": fill_price,
-                    "timestamp": dt.datetime.now().strftime("%H%M%S"),
-                }
-                self._mock_fill_queue.append(fake_fill)
-
             return {'order_id': order_id, 'symbol': symbol, 'side': side, 'quantity': quantity, 'price': price, 'status': 'open'}
         
         logger.error(f"{symbol} 주문 실패: {data.get('msg1')}")
@@ -487,17 +570,6 @@ class Broker:
         금일 체결 내역을 조회합니다.
         모의투자 시에는 내부 큐에서 시뮬레이션된 체결 내역을 반환합니다.
         """
-        # --- 모의투자용 가짜 체결 데이터 반환 ---
-        if self.IS_MOCK:
-            if not self._mock_fill_queue:
-                return []
-            
-            logger.info(f"[모의] {len(self._mock_fill_queue)}개의 시뮬레이션된 체결 내역을 반환합니다.")
-            # 큐의 모든 내용을 복사하여 반환하고, 원래 큐는 비웁니다.
-            fills_to_return = list(self._mock_fill_queue)
-            self._mock_fill_queue.clear()
-            return fills_to_return
-
         # --- 실전 투자용 API 호출 ---
         url_path = "/uapi/domestic-stock/v1/trading/inquire-not-concluded-account"
         tr_id = "TTTC8001R"
