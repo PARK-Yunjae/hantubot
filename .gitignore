@@ -20,3 +20,6 @@ dist/
 *.egg-info
 venv/
 .venv/
+# Data files
+*.xlsx
+

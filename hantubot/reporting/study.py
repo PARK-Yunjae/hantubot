@@ -2,15 +2,15 @@
 import os
 import time
 from datetime import datetime
-from typing import List
+from typing import List, Dict
+import json
 
 import gspread
 import pandas as pd
 from google.oauth2.service_account import Credentials
 from gspread_dataframe import set_with_dataframe
 from pykrx import stock
-from pykrx import stock
-import google.generativeai as genai
+import google.genai as genai # Deprecation warning is noted, this is the modern convention.
 
 from .logger import get_logger
 
@@ -24,27 +24,56 @@ GSHEET_SCOPE = [
 GSHEET_CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'configs', 'google_service_account.json')
 GSHEET_NAME = "시장 관심주 추적"
 
-# --- Gemini API Functions ---
-def get_company_summary_with_gemini(stock_name: str, ticker: str) -> str:
+# --- Gemini API Functions (Batch Optimized) ---
+def get_batch_summaries_with_gemini(stocks_to_summarize: List[Dict]) -> Dict[str, str]:
     """
-    Uses the Gemini API to generate a concise summary of a company's business.
+    Uses the Gemini API to generate concise summaries for a batch of stocks in a single call.
+    Returns a dictionary mapping ticker to summary.
     """
+    summaries = {stock['ticker']: "요약 생성 실패" for stock in stocks_to_summarize}
+    
     try:
         api_key = os.getenv('GEMINI_API_KEY')
         if not api_key:
             logger.warning("GEMINI_API_KEY not found in .env file. Skipping summary.")
-            return "Gemini API 키가 설정되지 않았습니다."
+            return summaries
 
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-2.5-flash')
+        model = genai.GenerativeModel('gemini-1.5-flash')
         
-        prompt = f"'{stock_name}'({ticker})는 어떤 회사인가요? 핵심 사업 내용을 한국어로 2~3문장으로 요약해주세요."
+        # Build a single prompt for all stocks
+        stock_list_str = "\n".join([f"- {s['name']} ({s['ticker']})" for s in stocks_to_summarize])
+        prompt = (
+            "아래 주식 종목들에 대해, 각각의 핵심 사업 내용을 한국어로 2~3 문장으로 요약해줘.\n"
+            "각 문장 끝에는 줄바꿈 문자(\\n)를 포함해서 가독성을 높여줘.\n"
+            "결과는 반드시 아래와 같은 JSON 형식으로 '종목코드': '요약' 형태로 제공해줘. 다른 설명은 모두 제외해줘.\n"
+            "```json\n"
+            "{\n"
+            '  "005930": "세계적인 종합 반도체 기업으로, 메모리 반도체와 시스템 LSI 사업을 영위함.\n스마트폰, TV, 가전제품 등 다양한 전자제품을 생산 및 판매하며 글로벌 IT 시장을 선도함.",\n'
+            '  "000660": "DRAM, 낸드플래시 등 메모리 반도체를 주력으로 생산하는 기업임.\n서버, 모바일, PC 등 다양한 IT 기기에 필수적인 부품을 공급하며 기술 경쟁력을 확보하고 있음."\n'
+            "}\n"
+            "```\n\n"
+            f"요약할 종목 목록:\n{stock_list_str}"
+        )
         
         response = model.generate_content(prompt)
-        return response.text.strip()
+        
+        # Clean up and parse the JSON response
+        cleaned_response = response.text.strip().replace("```json", "").replace("```", "").strip()
+        json_response = json.loads(cleaned_response)
+
+        # Gemini might return summaries for different tickers, so we update our dict safely
+        for ticker, summary in json_response.items():
+            if ticker in summaries:
+                summaries[ticker] = summary
+        
+        logger.info(f"Successfully generated summaries for {len(json_response)} stocks in a single batch call.")
+        return summaries
+
     except Exception as e:
-        logger.error(f"Failed to get company summary for {stock_name} using Gemini API: {e}")
-        return f"Gemini API 요약 실패: {e}"
+        logger.error(f"Failed to get batch company summaries using Gemini API: {e}", exc_info=True)
+        return summaries
+
 
 # --- Google Sheets Functions ---
 def get_gsheet_client():
@@ -78,7 +107,7 @@ def run_daily_study(broker, notifier):
         log_ws = get_worksheet_or_create(spreadsheet, "DailyLog")
         
         existing_df = pd.DataFrame(log_ws.get_all_records())
-        if not existing_df.empty and today_date_str_for_check in existing_df['Date'].values:
+        if not existing_df.empty and today_date_str_for_check in existing_df['날짜'].values:
             logger.info(f"Today's study for {today_date_str_for_check} has already been completed. Skipping.")
             return
 
@@ -99,23 +128,38 @@ def run_daily_study(broker, notifier):
             logger.info("No stocks met the criteria for daily study today.")
             return
         
-        interesting_tickers = interesting_tickers_df.index.tolist()
-        logger.info(f"Found {len(interesting_tickers)} stocks for daily study.")
+        # [수정] ETF, 스팩 등 제외 필터링 적용
+        from ..utils.stock_filters import is_eligible_stock
+        
+        unfiltered_tickers = interesting_tickers_df.index.tolist()
+        interesting_tickers = [
+            ticker for ticker in unfiltered_tickers 
+            if is_eligible_stock(stock.get_market_ticker_name(ticker))
+        ]
+        
+        if not interesting_tickers:
+            logger.info("필터링된 종목이 없어 데일리 스터디 대상이 없습니다.")
+            return
+            
+        logger.info(f"필터링 후 데일리 스터디 대상 적격 종목 {len(interesting_tickers)}개 발견.")
         df_funda = stock.get_market_fundamental_by_ticker(today_str)
     except Exception as e:
         logger.error(f"Failed to fetch stocks for daily study from pykrx: {e}", exc_info=True)
         return
-        
-    # 3. Process each stock and gather data
+
+    # 3. Get all summaries in one batch call
+    stocks_to_summarize = [{'ticker': t, 'name': stock.get_market_ticker_name(t)} for t in interesting_tickers]
+    all_summaries = get_batch_summaries_with_gemini(stocks_to_summarize)
+    time.sleep(15) # Respect potential API rate limits after a large call
+
+    # 4. Process each stock and gather data
     daily_records = []
     for ticker in interesting_tickers:
         try:
             stock_info = interesting_tickers_df.loc[ticker]
             stock_name = stock.get_market_ticker_name(ticker)
             
-            logger.info(f"Processing {stock_name} ({ticker})...")
-            
-            company_summary = get_company_summary_with_gemini(stock_name, ticker)
+            company_summary = all_summaries.get(ticker, "요약 없음.")
             
             pbr, per = 'N/A', 'N/A'
             if ticker in df_funda.index:
@@ -136,7 +180,6 @@ def run_daily_study(broker, notifier):
                 "PBR": pbr,
                 "PER": per,
             })
-            time.sleep(15)
         except Exception as e:
             logger.error(f"Failed to process {ticker} for GSheet: {e}")
 
@@ -144,11 +187,17 @@ def run_daily_study(broker, notifier):
         logger.info("No records to update to Google Sheets.")
         return
         
-    # 4. Update Google Sheets
+    # 5. Update Google Sheets
     try:
-        # Note: existing_df was fetched at the start of the function
         new_df = pd.DataFrame(daily_records)
-        combined_df = pd.concat([existing_df, new_df], ignore_index=True).astype(str)
+        if not existing_df.empty:
+            combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+        else:
+            combined_df = new_df
+        
+        # Ensure all data is string to avoid gspread issues
+        combined_df = combined_df.astype(str)
+
         set_with_dataframe(log_ws, combined_df, include_index=False, resize=True)
         logger.info(f"Appended {len(new_df)} new records to 'DailyLog' worksheet.")
 

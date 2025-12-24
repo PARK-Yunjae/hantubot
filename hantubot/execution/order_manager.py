@@ -3,7 +3,9 @@ import threading
 from datetime import datetime, timedelta
 from ..core.portfolio import Portfolio
 from ..core.clock import MarketClock
+from ..core.regime_manager import RegimeManager # New import
 from ..reporting.logger import get_logger, get_data_logger
+from ..reporting import trade_logger # New import
 
 logger = get_logger(__name__)
 trades_logger = get_data_logger("trades")
@@ -13,10 +15,11 @@ class OrderManager:
     모든 주문 요청을 중앙에서 처리하고 검증하는 클래스.
     SSOT(Single Source of Truth) 원칙을 강제한다.
     """
-    def __init__(self, broker, portfolio: Portfolio, clock: MarketClock):
+    def __init__(self, broker, portfolio: Portfolio, clock: MarketClock, regime_manager: RegimeManager):
         self._broker = broker # The broker instance for placing actual orders
         self._portfolio = portfolio
         self._clock = clock
+        self._regime_manager = regime_manager # New attribute
         self._locks: dict[str, threading.Lock] = {}  # 종목별 잠금을 위한 딕셔너리
         # 멱등성 키 저장소 (key: (strategy_id, symbol, side), value: (order_id, timestamp))
         self._idempotency_keys: dict[tuple, tuple] = {} 
@@ -48,6 +51,39 @@ class OrderManager:
         quantity = signal['quantity']
         strategy_id = signal['strategy_id']
         price = signal.get('price', 0) # 시장가 주문의 경우 가격이 없을 수 있음
+        order_type = signal.get('order_type', 'limit')
+
+        # --- [최종 방어] 신호 유효성 검증 ---
+        symbol = str(symbol).strip()
+
+        # 1) 종목코드 6자리 강제 (ex: 5930 -> "005930")
+        if symbol.isdigit() and len(symbol) < 6:
+            symbol = symbol.zfill(6)
+        signal['symbol'] = symbol # 업데이트된 심볼을 signal 딕셔너리에 다시 반영
+
+        # 2) 수량 검증
+        try:
+            quantity = int(quantity)
+        except (ValueError, TypeError):
+            logger.error(f"[OrderManager] Invalid quantity type: {quantity} ({type(quantity)}) for signal: {signal}")
+            return
+
+        if quantity <= 0:
+            logger.warning(f"[OrderManager] quantity<=0 ignored. symbol={symbol}, qty={quantity}, signal={signal}")
+            return
+        signal['quantity'] = quantity
+
+
+        # 3) 주문 타입 검증
+        order_type = str(order_type).lower().strip()
+        if order_type not in ("market", "limit"):
+            logger.warning(f"[OrderManager] Unknown order_type='{order_type}'. Forcing 'market'.")
+            order_type = "market"
+        signal['order_type'] = order_type
+
+        # [전수조사 수정] 가격이 0이거나 그 이하일 경우, 주문 유형을 '시장가'로 강제합니다.
+        if price <= 0:
+            order_type = 'market'
         
         # 1. 거래 시간 확인
         if not self._clock.is_market_open():
@@ -63,7 +99,24 @@ class OrderManager:
 
             # 3. 포지션 및 잔고 검증
             if side == 'buy':
-                required_cash = price * quantity
+                # [전수조사 수정] 중앙에서 "1종목 보유" 규칙 강제 적용
+                # if self._portfolio.get_positions():
+                #     logger.warning(f"[OrderManager] BUY signal for {symbol} ignored. A position is already held, adhering to one-stock-at-a-time rule.")
+                #     return
+
+                # 시장가 주문일 경우 현재가를 조회하여 주문 금액 계산
+                effective_price = price
+
+                if order_type == 'market':
+                    current_price = self._broker.get_current_price(symbol)
+                    if current_price == 0:
+                        logger.error(f"[OrderManager] Failed to fetch current price for market BUY on {symbol}. Order rejected.")
+                        return
+                    # 슬리피지를 고려하여 5%의 버퍼를 추가
+                    effective_price = current_price * 1.05
+                    logger.info(f"[OrderManager] Market BUY for {symbol}: using estimated price {effective_price:,.0f} (current: {current_price:,.0f} + 5% buffer) for cash check.")
+
+                required_cash = effective_price * quantity
                 if not self._portfolio.is_sufficient_cash(required_cash):
                     logger.error(f"[OrderManager] Insufficient cash for BUY {symbol}. Required: {required_cash:,.0f}, Available: {self._portfolio.get_cash():,.0f}")
                     return
@@ -79,7 +132,7 @@ class OrderManager:
                     side=side,
                     quantity=quantity,
                     price=price,
-                    order_type=signal.get('order_type', 'limit')
+                    order_type=order_type
                 )
                 
                 if order_result and order_result.get('order_id'):
@@ -106,12 +159,42 @@ class OrderManager:
         :param fill_details: {'order_id': str, 'symbol': str, 'side': str, 'filled_quantity': int, 'fill_price': float}
         """
         logger.info(f"Handling fill update: {fill_details}")
+
+        # 1. 체결 정보에서 변수 추출
+        order_id = fill_details.get('order_id')
+        symbol = fill_details.get('symbol')
+        side = fill_details.get('side')
+        filled_quantity = fill_details.get('filled_quantity', 0)
+        fill_price = fill_details.get('fill_price', 0.0)
+
+        # 2. 포트폴리오 업데이트 전, PnL 계산 및 로깅에 필요한 정보 조회
+        original_order = self._portfolio._open_orders.get(order_id, {})
+        strategy_id = original_order.get('strategy_id', 'unknown')
+        current_regime = self._regime_manager.get_current_regime()
+        pnl_pct = None
         
-        # 1. 포트폴리오 상태 업데이트
+        if side == 'sell':
+            position_before_sale = self._portfolio.get_position(symbol)
+            if position_before_sale and position_before_sale.get('avg_price', 0) > 0:
+                pnl_pct = ((fill_price / position_before_sale['avg_price']) - 1) * 100
+
+        # 3. 포트폴리오 상태 업데이트 (가장 먼저 처리)
         self._portfolio.update_on_fill(fill_details)
         
-        # 2. 체결 데이터를 JSONL 파일에 로깅
-        trades_logger.info({'event_type': 'FILL', **fill_details})
+        # 4. 체결 데이터를 JSONL 파일에 로깅
+        trade_record = {
+            "timestamp": datetime.now().isoformat(),
+            "event_type": "FILL",
+            "order_id": order_id,
+            "symbol": symbol,
+            "side": side,
+            "quantity": filled_quantity,
+            "price": fill_price,
+            "strategy_id": strategy_id,
+            "market_regime": current_regime,
+            "pnl_pct": pnl_pct,
+        }
+        trade_logger.log_trade_record(trade_record)
 
 if __name__ == '__main__':
     # --- Mock Objects for Testing ---

@@ -8,12 +8,14 @@ from typing import Dict, List, Any
 
 from ..core.clock import MarketClock
 from ..core.portfolio import Portfolio
+from ..core.regime_manager import RegimeManager # RegimeManager 임포트
 from ..execution.broker import Broker
 from ..execution.order_manager import OrderManager
 from ..reporting.logger import get_logger, get_data_logger
 from ..reporting.notifier import Notifier
 from ..reporting.report import ReportGenerator
 from ..reporting.study import run_daily_study
+from ..optimization.analyzer import run_daily_optimization # New import
 from ..strategies.base_strategy import BaseStrategy
 
 logger = get_logger(__name__)
@@ -26,7 +28,8 @@ class TradingEngine:
     주기적인 매매 루프를 관리합니다.
     """
     def __init__(self, config: Dict, market_clock: MarketClock, broker: Broker,
-                 portfolio: Portfolio, order_manager: OrderManager, notifier: Notifier):
+                 portfolio: Portfolio, order_manager: OrderManager, notifier: Notifier,
+                 regime_manager: RegimeManager): # Add regime_manager here
         self.config = config
         self.market_clock = market_clock
         self.broker = broker
@@ -36,91 +39,108 @@ class TradingEngine:
         self.active_strategies: List[BaseStrategy] = []
         self.daily_data_cache: Dict[str, Any] = {}
         self.cache_date = None
+        self._processed_fill_ids: set = set()
+        self._test_signal_injected = False # 가짜 신호 주입 여부 플래그
+        
+        # 레짐 관리자는 이제 외부에서 주입됩니다.
+        self.regime_manager = regime_manager
+        
         self._load_strategies()
         self._running = False
         logger.info("트레이딩 엔진 초기화 완료.")
 
     def _load_strategies(self):
-        """설정 파일에 정의된 전략들을 동적으로 로드합니다."""
-        strategy_configs = self.config.get('active_strategies', [])
+        """설정 파일에 정의된 전략들을 동적으로 로드하고, 실행 환경(모의/실전) 적합성을 검사합니다."""
+        strategy_names = self.config.get('active_strategies', [])
+        all_strategy_settings = self.config.get('strategy_settings', {})
+        current_mode = 'mock' if self.broker.IS_MOCK else 'live'
         
-        for strat_name in strategy_configs:
+        for strat_name in strategy_names:
             try:
-                # 전략 모듈을 절대 경로로 임포트합니다.
+                # 해당 전략의 설정을 config.yaml에서 가져옵니다.
+                strategy_config = all_strategy_settings.get(strat_name, {})
+                
+                # 1. 실행 모드 호환성 검사
+                supported_modes = strategy_config.get('supported_modes')
+                if supported_modes and current_mode not in supported_modes:
+                    logger.warning(
+                        f"전략 '{strat_name}' 로드 건너뜀. "
+                        f"이 전략은 {supported_modes} 모드만 지원하지만 현재 모드는 '{current_mode}'입니다."
+                    )
+                    continue
+
+                # 2. 개별 전략 활성화 여부 검사
+                if not strategy_config.get('enabled', True):
+                    logger.warning(f"Strategy '{strat_name}' is disabled in config. Skipping.")
+                    continue
+                
+                # 3. 전략 모듈 동적 로딩 및 초기화
                 module_path = f"hantubot.strategies.{strat_name}"
                 module = importlib.import_module(module_path)
                 
-                # 모듈 이름에서 클래스 이름을 유추합니다. (e.g., momentum_strategy -> MomentumStrategy)
                 strategy_class_name = ''.join(word.capitalize() for word in strat_name.split('_'))
-                
                 strategy_class = getattr(module, strategy_class_name)
-                
-                # Instantiate the strategy, passing required dependencies
+
                 strategy_instance = strategy_class(
                     strategy_id=strat_name,
-                    config={}, # Placeholder for strategy-specific config
+                    config=strategy_config, # 개별 전략 설정을 전달
                     broker=self.broker,
                     clock=self.market_clock,
                     notifier=self.notifier
                 )
                 self.active_strategies.append(strategy_instance)
-                logger.info(f"Strategy '{strat_name}' loaded successfully.")
+                logger.info(f"Strategy '{strat_name}' loaded successfully for '{current_mode}' mode.")
             except (ImportError, AttributeError) as e:
                 logger.error(f"Failed to load strategy '{strat_name}': {e}", exc_info=True)
                 self.notifier.send_alert(f"전략 로드 실패: {strat_name} ({e})", level='error')
         
         if not self.active_strategies:
-            logger.warning("전략이 로드되지 않았습니다. 봇이 매매 신호를 생성하지 않습니다.")
+            logger.warning("활성화된 전략이 없습니다. 봇이 매매 신호를 생성하지 않습니다.")
 
     async def _poll_for_fills(self):
-        """백그라운드에서 주기적으로 주문 체결 여부를 확인합니다."""
+        """백그라운드에서 주기적으로 실제 주문 체결 여부를 확인합니다."""
         logger.info("Fill polling task started.")
         while self._running:
             try:
-                # 포트폴리오에 기록된 미체결 주문 목록
-                open_order_ids = list(self.portfolio._open_orders.keys())
-                if not open_order_ids:
-                    await asyncio.sleep(15) # 미체결 주문이 없으면 15초 대기
+                if not self.portfolio._open_orders:
+                    await asyncio.sleep(15)
                     continue
-
-                # API를 통해 실제 미체결 주문 목록 조회
-                unclosed_orders_from_api = self.broker.get_unclosed_orders()
-                api_order_ids = {order['odno'] for order in unclosed_orders_from_api}
                 
-                # 시스템에는 있지만 API 결과에는 없는 주문 찾기 = 체결된 주문
-                filled_order_ids = [oid for oid in open_order_ids if oid not in api_order_ids]
+                concluded_orders = self.broker.get_concluded_orders()
+                
+                for fill in concluded_orders:
+                    execution_id = fill.get('execution_id')
+                    
+                    if not execution_id or execution_id in self._processed_fill_ids:
+                        continue
+                        
+                    logger.info(f"Detected new fill: {fill}")
+                    
+                    required_keys = ['order_id', 'symbol', 'side', 'filled_quantity', 'fill_price']
+                    if not all(k in fill for k in required_keys):
+                        logger.error(f"Incomplete fill data received from broker: {fill}. Skipping.")
+                        continue
 
-                for order_id in filled_order_ids:
-                    filled_order = self.portfolio._open_orders[order_id]
-                    logger.info(f"Detected fill for order ID: {order_id}. Details: {filled_order}")
+                    self.order_manager.handle_fill_update(fill)
+                    self._processed_fill_ids.add(execution_id)
                     
-                    # 체결 정보 구성 (API 응답을 파싱해야 하지만, 여기서는 주문 정보로 대체)
-                    fill_details = {
-                        'order_id': order_id,
-                        'symbol': filled_order['symbol'],
-                        'side': filled_order['side'],
-                        'filled_quantity': filled_order['quantity'], # 단순화를 위해 완전 체결로 가정
-                        'fill_price': filled_order['price'] # 실제 체결가는 별도 조회 필요
-                    }
-                    
-                    self.order_manager.handle_fill_update(fill_details)
-                    self.notifier.send_alert(f"주문 체결 감지: {fill_details['side']} {fill_details['symbol']} {fill_details['filled_quantity']}주", level='info')
+                    self.notifier.send_alert(
+                        f"주문 체결: {fill['side'].upper()} {fill['symbol']} {int(fill['filled_quantity'])}주 @ {float(fill['fill_price']):,.0f}원",
+                        level='info'
+                    )
             
             except Exception as e:
                 logger.error(f"Error in fill polling task: {e}", exc_info=True)
 
-            await asyncio.sleep(15) # 15초마다 폴링
+            await asyncio.sleep(15)
     
     async def _run(self):
         """메인 루프와 백그라운드 작업을 함께 실행합니다."""
         self._running = True
-        # 백그라운드에서 체결 확인 루프 시작
         fill_poller_task = asyncio.create_task(self._poll_for_fills())
         
-        # 메인 트레이딩 루프 실행
         await self.run_trading_loop()
 
-        # 종료 시 백그라운드 작업 취소
         fill_poller_task.cancel()
         try:
             await fill_poller_task
@@ -170,7 +190,6 @@ class TradingEngine:
         positions_to_sell = []
         for symbol, position in self.portfolio.get_positions().items():
             strategy_id = position.get('strategy_id', '')
-            # 종가매매 포지션 또는 시작 시 로드된 알 수 없는 포지션을 매도 대상에 추가
             if 'closing_price' in strategy_id or strategy_id == 'loaded_on_startup':
                 positions_to_sell.append(position)
                 logger.info(f"시초가 매도 대상 발견: {symbol} (사유: {strategy_id})")
@@ -190,13 +209,36 @@ class TradingEngine:
 
     async def _run_strategies(self, data_payload: Dict, closing_call: bool = False):
         """주어진 데이터로 적절한 시점의 전략을 실행하고 신호를 처리합니다."""
+        
+        # --- [테스트용] 가짜 신호 주입 로직 ---
+        test_config = self.config.get('testing', {})
+        if test_config.get('force_signal_enabled', False) and not self._test_signal_injected:
+            strategy_id = test_config.get('force_signal_strategy_id', 'volume_spike_strategy')
+            symbol = test_config.get('force_signal_symbol', '005930')
+            logger.warning(f"테스트용 가짜 신호를 주입합니다: 전략='{strategy_id}', 종목='{symbol}'")
+            
+            fake_signal = {
+                'strategy_id': strategy_id,
+                'symbol': symbol,
+                'side': 'buy',
+                'quantity': 1, # 테스트용 최소 수량
+                'price': 0,
+                'order_type': 'market',
+            }
+            self.order_manager.process_signal(fake_signal)
+            self._test_signal_injected = True # 한번만 실행되도록 플래그 설정
+            return # 가짜 신호 주입 후에는 실제 전략 로직을 건너뜀
+        
+        # 1. 현재 시장 레짐 결정
+        current_regime = self.regime_manager.determine_regime()
+        data_payload['regime'] = current_regime # 데이터 페이로드에 레짐 정보 추가
+        
         active_strategies_count = 0
         for strategy in self.active_strategies:
             try:
                 is_closing_strategy = 'closing_price' in strategy.strategy_id
                 
-                if (closing_call and not is_closing_strategy) or \
-                   (not closing_call and is_closing_strategy):
+                if closing_call != is_closing_strategy:
                     continue
                 
                 active_strategies_count += 1
@@ -209,7 +251,7 @@ class TradingEngine:
                 self.notifier.send_alert(f"전략 '{strategy.strategy_id}' 실행 중 오류 발생", level='error')
         
         if active_strategies_count > 0:
-            logger.info(f"{active_strategies_count}개의 활성 전략 실행 완료.")
+            logger.info(f"[{current_regime} 모드] {active_strategies_count}개의 활성 전략 실행 완료.")
         else:
             logger.debug("현재 시간에 실행할 활성 전략이 없습니다.")
 
@@ -233,6 +275,13 @@ class TradingEngine:
             logger.error(f"데일리 스터디 자료 생성 실패: {e}", exc_info=True)
             self.notifier.send_alert("데일리 스터디 자료 생성 중 오류가 발생했습니다.", level='error')
 
+        # 3. 일일 전략 최적화 루틴 실행
+        try:
+            run_daily_optimization()
+        except Exception as e:
+            logger.error(f"일일 전략 최적화 루틴 실행 실패: {e}", exc_info=True)
+            self.notifier.send_alert("일일 전략 최적화 루틴 실행 중 오류가 발생했습니다.", level='error')
+
         logger.info("모든 장 마감 후 작업 완료.")
 
     async def run_trading_loop(self):
@@ -242,40 +291,41 @@ class TradingEngine:
 
         while self._running:
             now = dt.datetime.now()
-            logger.debug(f"Trading loop tick: {now.strftime('%H:%M:%S')}")
+            logger.debug(f"트레이딩 루프 틱: {now.strftime('%H:%M:%S')}")
 
             is_trading_day = self.market_clock.is_trading_day(now.date())
 
             if is_trading_day:
                 if self.market_clock.is_market_open(now):
                     post_market_run_today = False
+                    logger.debug("장이 열려있습니다. 전략 실행 준비 중.")
                     
                     if now.hour == 9 and now.minute == 0:
                         await self._process_market_open_logic()
                     
+                    logger.debug("데이터 페이로드 준비 중...")
                     data_payload = await self._prepare_data_payload()
+                    logger.debug("데이터 페이로드 준비 완료. 전략 실행 중...")
+                    
                     is_closing_time = self.market_clock.is_market_closing_approach(now)
                     await self._run_strategies(data_payload, closing_call=is_closing_time)
+                    logger.debug("전략 실행 완료.")
                     
-                    # 60초 대기를 1초 단위로 쪼개어, 중간에 종료 신호를 받을 수 있도록 함
                     interval = self.config.get('trading_loop_interval_seconds', 60)
+                    logger.debug(f"다음 틱까지 {interval}초 대기 중...")
                     for _ in range(interval):
                         if not self._running:
                             break
                         await asyncio.sleep(1)
                     
                     continue
-                elif now.time() < self.market_clock.get_market_times()['open']:
-                    logger.info(f"개장 전입니다. {self.market_clock.get_market_times()['open']}까지 대기합니다.")
-                    open_time = dt.datetime.combine(now.date(), self.market_clock.get_market_times()['open'])
-                    await asyncio.sleep(max(1, (open_time - now).total_seconds()))
-                    continue
                 elif now.time() >= self.market_clock.get_market_times()['close'] and not post_market_run_today:
+                    logger.debug("장이 마감되었습니다. 장 마감 후 로직 실행 중.")
                     await self._process_post_market_logic()
                     post_market_run_today = True
             
             # 장 외 시간이거나, 비거래일이거나, 장 마감 후 로직을 이미 실행한 경우
-            logger.info("장 외 시간입니다. 다음 개장까지 대기합니다.")
+            logger.debug("장외 시간이거나 비거래일입니다. 장시간 대기 준비 중.")
             next_trading_day = now.date()
             if now.time() >= wake_up_time:
                 next_trading_day += dt.timedelta(days=1)

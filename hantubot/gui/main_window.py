@@ -18,6 +18,7 @@ from hantubot.reporting.logger import get_logger
 from hantubot.reporting.notifier import Notifier
 from hantubot.execution.broker import Broker
 from hantubot.core.portfolio import Portfolio
+from hantubot.core.regime_manager import RegimeManager # New import
 from hantubot.execution.order_manager import OrderManager
 from hantubot.core.engine import TradingEngine
 
@@ -66,6 +67,9 @@ class EngineWorker(QObject):
             notifier = Notifier(config_path=config_path)
             broker = Broker(config=config, is_mock=is_mock)
             
+            # Instantiate RegimeManager here
+            regime_manager = RegimeManager(config=config, broker=broker)
+
             balance_data = broker.get_balance()
             summary = balance_data.get('summary', {})
             positions = balance_data.get('positions', [])
@@ -75,11 +79,11 @@ class EngineWorker(QObject):
                 initial_cash = 10_000_000 if is_mock else 0 # Set default cash only if no positions and no cash
 
             portfolio = Portfolio(initial_cash=initial_cash, initial_positions=positions)
-            order_manager = OrderManager(broker=broker, portfolio=portfolio, clock=market_clock)
+            order_manager = OrderManager(broker=broker, portfolio=portfolio, clock=market_clock, regime_manager=regime_manager)
 
             self.engine = TradingEngine(
                 config=config, market_clock=market_clock, broker=broker,
-                portfolio=portfolio, order_manager=order_manager, notifier=notifier
+                portfolio=portfolio, order_manager=order_manager, notifier=notifier, regime_manager=regime_manager
             )
             
             self.engine_initialized.emit(self.engine)

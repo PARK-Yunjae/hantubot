@@ -21,6 +21,7 @@ from ..core.clock import MarketClock
 from ..execution.broker import Broker
 from ..reporting.logger import get_logger
 from ..reporting.notifier import Notifier
+from ..utils.stock_filters import is_eligible_stock
 
 logger = get_logger(__name__)
 
@@ -63,10 +64,17 @@ class ClosingPriceAdvancedScreener(BaseStrategy):
 
         try:
             # KIS API를 통해 실시간 거래대금 상위 종목 조회
-            top_volume_stocks = self.broker.get_realtime_transaction_ranks(top_n=self.top_n_volume)
-            if not top_volume_stocks:
+            top_volume_stocks_raw = self.broker.get_realtime_transaction_ranks(top_n=self.top_n_volume)
+            if not top_volume_stocks_raw:
                 logger.warning(f"[{self.name}] 실시간 거래대금 상위 종목 조회 실패.")
                 return signals
+
+            # [수정] ETF, 스팩 등 필터링
+            top_volume_stocks = [
+                item for item in top_volume_stocks_raw
+                if is_eligible_stock(item.get('hts_kor_isnm', ''))
+            ]
+            logger.info(f"[{self.name}] 필터링 후 적격 종목 {len(top_volume_stocks)}개 발견.")
 
         except Exception as e:
             logger.error(f"[{self.name}] KIS API로 거래대금 상위 종목 조회 실패: {e}", exc_info=True)
@@ -136,11 +144,29 @@ class ClosingPriceAdvancedScreener(BaseStrategy):
         self.notifier.send_alert("종가매매 후보 종목 알림", embed=embed)
         
         if self.auto_buy_enabled and top_stocks:
+            # 최대 복리 테스트: 포트폴리오에 보유 종목이 없어야만 매수
+            if portfolio.get_positions():
+                logger.info(f"[{self.name}] 자동 매수 활성화 상태이나, 이미 보유 중인 종목이 있어 매수 신호를 생성하지 않습니다.")
+                return signals
+
             top_stock = top_stocks[0]
             logger.info(f"[{self.name}] 자동 매수 활성화됨. 1위 종목 {top_stock['name']} 매수 신호를 생성합니다.")
             
+            # 최대 복리 테스트: 가용 현금 95%로 주문 수량 계산
+            available_cash = portfolio.get_cash()
+            current_price = top_stock['price']
+            if current_price <= 0:
+                logger.warning(f"[{self.name}] {top_stock['name']}의 현재가가 0 이하여서 주문할 수 없습니다.")
+                return signals
+            
+            order_amount = available_cash * 0.95
+            quantity = int(order_amount // current_price)
+            
+            if quantity == 0:
+                logger.warning(f"[{self.name}] 가용 현금이 부족하여 {top_stock['name']}를 1주도 매수할 수 없습니다.")
+                return signals
+            
             # ML 특징 추출
-            # 점수 계산에 사용된 값들을 그대로 저장
             features = {
                 'total_score': top_stock.get('score'),
                 'score_detail': top_stock.get('score_detail')
@@ -148,7 +174,7 @@ class ClosingPriceAdvancedScreener(BaseStrategy):
 
             signals.append({
                 'strategy_id': self.strategy_id, 'symbol': top_stock['ticker'], 'side': 'buy',
-                'quantity': self.buy_quantity, 'price': 0, 'order_type': 'market',
+                'quantity': quantity, 'price': 0, 'order_type': 'market',
                 'features': features
             })
 

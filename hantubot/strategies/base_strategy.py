@@ -1,6 +1,8 @@
 # hantubot_prod/hantubot/strategies/base_strategy.py
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any
+import os
+import json
 
 from ..core.portfolio import Portfolio
 from ..reporting.logger import get_logger
@@ -9,6 +11,8 @@ from ..core.clock import MarketClock
 from ..reporting.notifier import Notifier
 
 logger = get_logger(__name__)
+
+DYNAMIC_PARAMS_FILE = os.path.join("configs", "dynamic_params.json")
 
 class BaseStrategy(ABC):
     """
@@ -21,7 +25,27 @@ class BaseStrategy(ABC):
         self.broker = broker
         self.clock = clock
         self.notifier = notifier
-        logger.info(f"Strategy '{self.name}' (ID: {self.strategy_id}) initialized with config: {self.config}")
+        self.dynamic_params: Dict[str, Any] = {} # 동적 파라미터 저장소
+        
+        self._load_dynamic_params() # 동적 파라미터 로드
+        
+        logger.info(f"Strategy '{self.name}' (ID: {self.strategy_id}) initialized with config: {self.config}, Dynamic: {self.dynamic_params}")
+
+    def _load_dynamic_params(self):
+        """
+        configs/dynamic_params.json 파일에서 이 전략에 해당하는 동적 파라미터를 로드합니다.
+        """
+        if os.path.exists(DYNAMIC_PARAMS_FILE):
+            try:
+                with open(DYNAMIC_PARAMS_FILE, 'r', encoding='utf-8') as f:
+                    all_dynamic_params = json.load(f)
+                    self.dynamic_params = all_dynamic_params.get(self.strategy_id, {})
+                    if self.dynamic_params:
+                        logger.info(f"전략 '{self.name}' (ID: {self.strategy_id})에 동적 파라미터 로드: {self.dynamic_params}")
+            except Exception as e:
+                logger.error(f"전략 '{self.name}' 동적 파라미터 로드 중 오류 발생: {e}", exc_info=True)
+        else:
+            logger.debug(f"동적 파라미터 파일 {DYNAMIC_PARAMS_FILE}이(가) 존재하지 않습니다. 동적 파라미터를 로드하지 않습니다.")
 
     @property
     def name(self) -> str:

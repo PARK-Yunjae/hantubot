@@ -54,8 +54,8 @@ trading_loop_interval_seconds: 60
 #   - 'mean_reversion_strategy'
 active_strategies:
   - 'closing_price_advanced_screener'
-  # - 'opening_breakout_strategy'
-  # - 'volume_spike_strategy'
+  - 'opening_breakout_strategy'
+  - 'volume_spike_strategy'
 
 # ------------------------------------------------------------------------------
 
@@ -87,6 +87,15 @@ logging:
 
 # ------------------------------------------------------------------------------
 
+# 레짐(시장 상황) 결정에 사용될 설정
+regime_settings:
+  # 이 값 이상이면 RISK_ON (상승장)으로 판단 (KOSPI 또는 KOSDAQ 등락률 %)
+  risk_on_threshold: 0.7
+  # 이 값 이하이면 RISK_OFF (하락장)으로 판단
+  risk_off_threshold: -0.7
+
+# ------------------------------------------------------------------------------
+
 # 전략별 상세 설정
 strategy_settings:
   closing_price_advanced_screener:
@@ -95,3 +104,58 @@ strategy_settings:
     auto_buy_enabled: true
     # 자동 매수 시 주문할 수량
     buy_quantity: 1
+    # 지원하는 실행 모드 ('live': 실전, 'mock': 모의)
+    supported_modes: ['mock', 'live']
+
+  opening_breakout_strategy:
+    # 지원하는 실행 모드. 모의투자 시에는 네이버 금융 데이터로 대체하여 실행.
+    supported_modes: ['mock', 'live']
+
+  volume_spike_strategy:
+    # 이 전략을 활성화할지 여부. false로 설정 시 레짐에 관계없이 실행되지 않음.
+    enabled: true
+    # 지원하는 실행 모드. 모의투자 시에는 네이버 금융 데이터로 대체하여 실행.
+    supported_modes: ['mock', 'live']
+    # 레짐별 파라미터. 현재 레짐에 해당하는 설정이 없으면 NEUTRAL 값을 기본으로 사용.
+    params_by_regime:
+      RISK_ON: # 상승장 (매매 기준 완화)
+        name: "상승장 모드 (적극 매매)"
+        take_profit_pct: 3.0
+        stop_loss_pct: -2.0
+        rank_jump_buy_threshold: 15 # 순위권 밖(>35)에 있던 종목이 이 순위 안으로 들어오면 매수
+        rank_jump_prev_threshold: 35
+        rank_sell_threshold: 40     # 보유 종목이 이 순위 밖으로 밀려나면 매도
+        max_positions: 2            # 이 전략으로 보유할 수 있는 최대 종목 수
+        trade_enabled: true         # 이 레짐에서 거래 활성화
+      NEUTRAL: # 횡보장 (기본 기준)
+        name: "중립장 모드 (표준 매매)"
+        take_profit_pct: 2.0
+        stop_loss_pct: -2.0
+        rank_jump_buy_threshold: 100 # 테스트용: 10 -> 100
+        rank_jump_prev_threshold: 101 # 테스트용: 30 -> 101
+        rank_sell_threshold: 30
+        max_positions: 1
+        trade_enabled: true
+      RISK_OFF: # 하락장 (매매 기준 강화 또는 중단)
+        name: "하락장 모드 (보수적 매매)"
+        take_profit_pct: 1.5
+        stop_loss_pct: -1.5
+        rank_jump_buy_threshold: 5
+        rank_jump_prev_threshold: 20
+        rank_sell_threshold: 20
+        max_positions: 1
+        trade_enabled: false # 하락장에서는 신규 매수 안함
+        
+# ------------------------------------------------------------------------------
+
+# 테스트 전용 설정 (주의: 실전 투자 시에는 모두 false 또는 주석 처리)
+testing:
+  # true일 경우, 아래에 지정된 전략/종목으로 1회성 가짜 매수 신호를 발생시켜
+  # 전체 매매 파이프라인(주문->체결->로깅)을 테스트합니다.
+  force_signal_enabled: true
+  
+  # 가짜 신호를 발생시킬 전략의 ID
+  force_signal_strategy_id: 'volume_spike_strategy'
+  
+  # 가짜 신호로 매수할 종목 코드
+  force_signal_symbol: '005930' # 삼성전자

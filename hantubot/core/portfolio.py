@@ -48,6 +48,13 @@ class Portfolio:
         """특정 종목의 포지션 정보를 반환합니다."""
         return self._positions.get(symbol)
 
+    def get_positions_by_strategy(self, strategy_id: str) -> Dict[str, Dict]:
+        """특정 전략(strategy_id)에 의해 관리되는 포지션만 필터링하여 반환합니다."""
+        return {
+            symbol: pos for symbol, pos in self._positions.items()
+            if pos.get('strategy_id') == strategy_id
+        }
+
     def get_position_quantity(self, symbol: str) -> int:
         """특정 종목의 보유 수량을 반환합니다."""
         position = self.get_position(symbol)
@@ -75,23 +82,25 @@ class Portfolio:
     def update_on_fill(self, fill_details: dict):
         """
         주문이 체결되었을 때 포트폴리오 상태를 업데이트합니다.
-        :param fill_details: {'order_id': str, 'symbol': str, 'side': str, 'filled_quantity': int, 'fill_price': float}
+        부분 체결을 올바르게 처리합니다.
+        :param fill_details: {'order_id': str, 'symbol': str, 'side': str, 'filled_quantity': int, 'fill_price': float, 'execution_id': str}
         """
         order_id = fill_details['order_id']
         
-        # 미체결 주문 목록에서 해당 주문 정보 가져오기
-        original_order = self._open_orders.pop(order_id, None)
+        # 미체결 주문 목록에서 해당 주문 정보 가져오기 (제거하지 않음)
+        original_order = self._open_orders.get(order_id)
         if not original_order:
-            logger.warning(f"체결된 주문(ID: {order_id})이 미체결 목록에 없습니다. 이미 처리된 주문일 수 있습니다.")
+            logger.warning(f"체결된 주문(ID: {order_id})이 미체결 목록에 없습니다. 이미 처리되었거나 외부에서 발생한 주문일 수 있습니다.")
             return
 
         symbol = fill_details['symbol']
         side = fill_details['side']
-        filled_quantity = fill_details['filled_quantity']
-        fill_price = fill_details['fill_price']
-        strategy_id = original_order.get('strategy_id', 'unknown') # 주문 시점의 전략 ID 가져오기
+        filled_quantity = int(fill_details['filled_quantity'])
+        fill_price = float(fill_details['fill_price'])
+        strategy_id = original_order.get('strategy_id', 'unknown')
         transaction_amount = filled_quantity * fill_price
 
+        # --- 자산 상태 업데이트 (현금 및 포지션) ---
         if side == 'buy':
             self._cash -= transaction_amount
             
@@ -100,30 +109,36 @@ class Portfolio:
                 total_quantity = existing_position['quantity'] + filled_quantity
                 total_value = (existing_position['quantity'] * existing_position['avg_price']) + transaction_amount
                 new_avg_price = total_value / total_quantity
-                # 기존 포지션에 수량과 평단가만 업데이트 (전략 ID는 최초 매수 시점의 것 유지)
                 self._positions[symbol]['quantity'] = total_quantity
                 self._positions[symbol]['avg_price'] = new_avg_price
             else:
                 self._positions[symbol] = {
                     'quantity': filled_quantity, 
                     'avg_price': fill_price,
-                    'strategy_id': strategy_id # 신규 포지션에 전략 ID 태그
+                    'strategy_id': strategy_id
                 }
-            
-            logger.info(f"매수 체결: {symbol} {filled_quantity}주 @ {fill_price:,.0f}원. (전략: {strategy_id}) | 잔여 현금: {self._cash:,.0f}원")
+            logger.info(f"매수 체결: {symbol} {filled_quantity}주 @ {fill_price:,.0f}원 (전략: {strategy_id}) | 잔여 현금: {self._cash:,.0f}원")
 
         elif side == 'sell':
             self._cash += transaction_amount
 
             existing_quantity = self.get_position_quantity(symbol)
-            if existing_quantity > filled_quantity:
+            if existing_quantity >= filled_quantity:
                 self._positions[symbol]['quantity'] -= filled_quantity
-            elif existing_quantity == filled_quantity:
-                del self._positions[symbol]
+                if self._positions[symbol]['quantity'] == 0:
+                    del self._positions[symbol]
             else:
-                logger.error(f"매도 수량({filled_quantity})이 보유 수량({existing_quantity})을 초과합니다. ({symbol})")
-
-            logger.info(f"매도 체결: {symbol} {filled_quantity}주 @ {fill_price:,.0f}원. (전략: {strategy_id}) | 잔여 현금: {self._cash:,.0f}원")
+                logger.error(f"매도 수량({filled_quantity})이 보유 수량({existing_quantity})을 초과합니다. ({symbol}) 포지션을 0으로 초기화합니다.")
+                del self._positions[symbol]
+            logger.info(f"매도 체결: {symbol} {filled_quantity}주 @ {fill_price:,.0f}원 (전략: {strategy_id}) | 잔여 현금: {self._cash:,.0f}원")
+        
+        # --- 미체결 주문 상태 업데이트 ---
+        original_order['quantity'] -= filled_quantity
+        if original_order['quantity'] <= 0:
+            self._open_orders.pop(order_id)
+            logger.info(f"주문 ID {order_id}가 완전히 체결되었습니다. 미체결 목록에서 제거합니다.")
+        else:
+            logger.info(f"주문 ID {order_id}가 부분 체결되었습니다. 남은 미체결 수량: {original_order['quantity']}")
 
 
     def update_on_cancel(self, order_id: str):
