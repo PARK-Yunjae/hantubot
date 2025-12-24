@@ -148,20 +148,22 @@ Hantubot은 한국투자증권 API를 활용한 **완전 자동화된 알고리�
 
 ## 💻 설치 방법
 
-### 방법 1: 아나콘다 **없이** 설치 (권장) ⭐
+### ⭐ 권장: venv로 설치 (가볍고 빠름!)
 
-#### Step 1: Python 설치
+아나콘다 없이도 Python 기본 가상환경만으로 충분합니다! 더 가볍고 배포도 쉽습니다.
+
+#### Step 1: Python 설치 (3.11 이상)
 
 **Windows:**
 1. [Python 공식 사이트](https://www.python.org/downloads/) 접속
 2. "Download Python 3.11" 클릭
-3. 설치 시 **"Add Python to PATH"** 체크 ✅
+3. 설치 시 **"Add Python to PATH"** 체크 ✅ (중요!)
 4. Install Now 클릭
 
 **확인:**
 ```bash
 python --version
-# Python 3.11.x 출력되면 성공
+# Python 3.11.x 또는 3.12.x 출력되면 성공
 ```
 
 #### Step 2: 프로젝트 클론
@@ -171,10 +173,10 @@ git clone https://github.com/PARK-Yunjae/hantubot.git
 cd hantubot_prod
 ```
 
-#### Step 3: 가상환경 생성
+#### Step 3: 가상환경 생성 및 활성화
 
 ```bash
-# Windows
+# Windows (CMD 또는 PowerShell)
 python -m venv venv
 venv\Scripts\activate
 
@@ -185,31 +187,21 @@ source venv/bin/activate
 
 **가상환경 활성화 확인:**
 ```bash
-# 프롬프트 앞에 (venv) 표시되면 성공
+# 프롬프트 앞에 (venv) 표시되면 성공!
 (venv) C:\Coding\hantubot_prod>
 ```
 
 #### Step 4: 패키지 설치
 
 ```bash
+pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
----
-
-### 방법 2: 아나콘다로 설치
-
+**설치 확인:**
 ```bash
-# 1. 아나콘다 환경 생성
-conda create -n hantubot python=3.11 -y
-conda activate hantubot
-
-# 2. 프로젝트 클론
-git clone https://github.com/PARK-Yunjae/hantubot.git
-cd hantubot_prod
-
-# 3. 패키지 설치
-pip install -r requirements.txt
+pip list
+# PySide6, pandas, requests 등이 보이면 성공
 ```
 
 ---

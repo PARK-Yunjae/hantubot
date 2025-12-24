@@ -86,12 +86,10 @@ start_hantubot.bat - 바로가기
 ### Step 1: PyInstaller 설치
 
 ```bash
-# 아나콘다 환경
-conda activate hantubot_env
-pip install pyinstaller
-
-# 또는 venv 환경
+# venv 환경 활성화
 venv\Scripts\activate
+
+# PyInstaller 설치
 pip install pyinstaller
 ```
 
@@ -101,12 +99,24 @@ pip install pyinstaller
 
 ```batch
 @echo off
+chcp 65001 > nul
 echo ========================================
-echo   Hantubot EXE 빌드 중...
+echo   🔨 Hantubot EXE 빌드 중...
 echo ========================================
 
-REM 아나콘다 환경 활성화
-call %USERPROFILE%\anaconda3\Scripts\activate.bat hantubot_env
+REM 현재 디렉토리로 이동
+cd /d "%~dp0"
+
+REM venv 환경 활성화
+if exist "venv\Scripts\activate.bat" (
+    echo [INFO] venv 가상환경 활성화 중...
+    call venv\Scripts\activate.bat
+) else (
+    echo [ERROR] venv 가상환경을 찾을 수 없습니다!
+    echo [INFO] 먼저 'python -m venv venv' 명령으로 가상환경을 생성하세요.
+    pause
+    exit /b 1
+)
 
 REM 이전 빌드 삭제
 if exist "dist" rmdir /s /q dist
@@ -126,8 +136,8 @@ pyinstaller ^
 
 echo.
 echo ========================================
-echo   빌드 완료!
-echo   실행 파일: dist\Hantubot.exe
+echo   ✅ 빌드 완료!
+echo   📁 실행 파일: dist\Hantubot.exe
 echo ========================================
 pause
 ```

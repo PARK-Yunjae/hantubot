@@ -477,17 +477,6 @@ class TradingEngine:
             if not self._running:
                 break
 
-    async def _run(self):
-        """메인 루프와 백그라운드 작업을 함께 실행합니다."""
-        self._running = True
-        fill_poller_task = asyncio.create_task(self._poll_for_fills())
-        await self.run_trading_loop()
-        fill_poller_task.cancel()
-        try:
-            await fill_poller_task
-        except asyncio.CancelledError:
-            logger.info("체결 감시 태스크를 종료합니다.")
-
     def start(self):
         """트레이딩 엔진을 시작합니다."""
         logger.info("트레이딩 엔진을 시작합니다...")
