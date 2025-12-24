@@ -619,7 +619,7 @@ reports/
 ## 📞 문의
 
 - **GitHub Issues**: [Issues 페이지](https://github.com/PARK-Yunjae/hantubot/issues)
-- **Email**: your-email@example.com
+- **Email**: dbswoql0712@gmail.com
 
 ---
 
