@@ -2,7 +2,7 @@
 
 > **프로덕션급 알고리즘 트레이딩 시스템 | 한국투자증권 API 기반**
 
-[![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/Python-3.12+-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/Status-Production-success.svg)](https://github.com)
 
