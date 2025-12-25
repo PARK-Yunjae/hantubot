@@ -8,6 +8,33 @@ from datetime import datetime
 import plotly.express as px
 from utils.db_loader import load_study_data, load_all_run_dates, load_ticker_frequency
 
+
+# 한글 매핑 함수
+def translate_reason_flag(reason_flag):
+    """선정 사유를 한글로 변환"""
+    mapping = {
+        'limit_up': '상한가',
+        'volume_10m': '거래량 천만주',
+        'both': '상한가 + 거래량',
+        'limit_up / volume_10m': '상한가 + 거래량',
+        'volume_10m / limit_up': '상한가 + 거래량'
+    }
+    return mapping.get(reason_flag, reason_flag)
+
+
+def translate_status(status):
+    """상태를 한글로 변환"""
+    mapping = {
+        'pending': '대기중',
+        'news_collected': '뉴스 수집 완료',
+        'no_news': '뉴스 없음',
+        'news_failed': '뉴스 수집 실패',
+        'summarized': 'AI 요약 완료',
+        'summary_failed': 'AI 요약 실패',
+        'completed': '완료'
+    }
+    return mapping.get(status, status)
+
 # 페이지 설정
 st.set_page_config(
     page_title="유목민 공부법 대시보드",
@@ -142,7 +169,7 @@ if filtered_candidates:
     # DataFrame 생성
     df_candidates = pd.DataFrame(filtered_candidates)
     
-    # 표시할 컬럼 선택
+    # 표시할 컬럼 선택 (먼저 선택)
     display_columns = {
         'ticker': '종목코드',
         'name': '종목명',
@@ -155,6 +182,14 @@ if filtered_candidates:
     }
     
     df_display = df_candidates[[col for col in display_columns.keys() if col in df_candidates.columns]].copy()
+    
+    # 한글 번역 적용 (컬럼명 변경 전)
+    if 'reason_flag' in df_display.columns:
+        df_display['reason_flag'] = df_display['reason_flag'].apply(translate_reason_flag)
+    if 'data_collection_status' in df_display.columns:
+        df_display['data_collection_status'] = df_display['data_collection_status'].apply(translate_status)
+    
+    # 컬럼명을 한글로 변경
     df_display.columns = [display_columns[col] for col in df_display.columns]
     
     # 숫자 포맷팅
