@@ -163,14 +163,15 @@ class ClosingPriceAdvancedScreener(BaseStrategy):
                 self.has_run_today = False
             return signals
         
-        # 이미 포지션이나 미체결 주문이 있으면 실행 안함 (중복 방지)
-        if portfolio.get_positions() or portfolio._open_orders:
-            logger.info(f"[{self.name}] 이미 포지션 또는 미체결 주문이 있어 스크리너 실행을 건너뜁니다.")
-            self.has_run_today = True  # 플래그 설정하여 오늘은 더 이상 실행 안함
-            return signals
-
+        # 스크리너는 무조건 실행 (Discord 알림 + 학습 목적)
         logger.info(f"[{self.name}] 고급 스크리너 v3 실행. 시간: {now.strftime('%H:%M:%S')}")
         self.has_run_today = True
+        
+        # 포지션 체크는 나중에 (매수 신호 생성 시에만 체크)
+        has_existing_positions = bool(portfolio.get_positions() or portfolio._open_orders)
+        if has_existing_positions:
+            logger.info(f"[{self.name}] 포지션이 있어 스크리닝 결과만 알림하고 매수는 건너뜁니다.")
+            # ❌ return signals 제거! 스크리너는 계속 실행!
 
         try:
             # KIS API를 통해 실시간 거래대금 상위 종목 조회

@@ -302,11 +302,11 @@ class TradingEngine:
                     self.order_manager.process_signal(sell_signal)
                     liquidated = True
             
-            # volume_spike_strategy: 14:59부터 청산 시작
+            # volume_spike_strategy: 14:58부터 청산 시작 (2분 여유)
             elif 'volume_spike' in strategy_id:
-                # 14:59 이상이면 청산
-                if (now.hour == 14 and now.minute >= 59) or now.hour >= 15:
-                    logger.warning(f"[우선 청산] {symbol} - volume_spike 시간 종료 임박 (15:00)")
+                # 14:58 이상이면 청산 (종가매매와 충돌 방지)
+                if (now.hour == 14 and now.minute >= 58) or now.hour >= 15:
+                    logger.warning(f"[우선 청산] {symbol} - volume_spike 시간 종료 임박 (15:00, 2분 전 청산)")
                     sell_signal = {
                         'strategy_id': 'forced_liquidation_1500',
                         'symbol': symbol,
