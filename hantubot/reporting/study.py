@@ -19,7 +19,36 @@ from ..providers import NaverNewsProvider
 logger = get_logger(__name__)
 
 
-def run_daily_study(broker, notifier, force_run=False):
+def get_latest_trading_date() -> str:
+    """
+    최근 거래일을 조회합니다 (오늘이 휴장일이면 이전 거래일 반환)
+    
+    Returns:
+        YYYYMMDD 형식의 최근 거래일
+    """
+    from datetime import datetime, timedelta
+    
+    today = datetime.now()
+    
+    # 최대 10일 전까지 확인 (주말, 공휴일 고려)
+    for i in range(10):
+        check_date = today - timedelta(days=i)
+        date_str = check_date.strftime("%Y%m%d")
+        
+        try:
+            # pykrx로 해당 날짜에 시장 데이터가 있는지 확인
+            df = stock.get_market_ohlcv_by_ticker(date_str, market="KOSPI")
+            if not df.empty:
+                logger.info(f"최근 거래일 확인: {date_str}")
+                return date_str
+        except:
+            continue
+    
+    # 찾지 못하면 오늘 날짜 반환 (fallback)
+    return today.strftime("%Y%m%d")
+
+
+def run_daily_study(broker, notifier, force_run=False, target_date=None):
     """
     유목민 공부법 메인 함수 - SQLite 기반 데이터 수집 및 분석
     
@@ -27,6 +56,7 @@ def run_daily_study(broker, notifier, force_run=False):
         broker: 브로커 인스턴스 (미사용, 시그니처 호환성 유지)
         notifier: 알림 인스턴스
         force_run: True면 중복 체크 무시하고 강제 실행
+        target_date: 특정 날짜 지정 (YYYYMMDD), None이면 최근 거래일 자동 조회
     """
     logger.info("=" * 80)
     logger.info("유목민 공부법 (100일 공부) 시작 - SQLite + 뉴스 수집 버전")
@@ -35,9 +65,14 @@ def run_daily_study(broker, notifier, force_run=False):
     # 환경 변수 확인
     study_mode = os.getenv('STUDY_MODE', 'sqlite')  # sqlite / gsheet / both
     
-    # 날짜 설정
-    today_str = datetime.now().strftime("%Y%m%d")
-    today_date = datetime.now().strftime("%Y-%m-%d")
+    # 날짜 설정 (최근 거래일 자동 조회)
+    if target_date:
+        today_str = target_date
+    else:
+        today_str = get_latest_trading_date()
+        logger.info(f"자동 조회된 최근 거래일: {today_str}")
+    
+    today_date = datetime.strptime(today_str, "%Y%m%d").strftime("%Y-%m-%d")
     
     # DB 초기화
     try:
@@ -98,6 +133,17 @@ def run_daily_study(broker, notifier, force_run=False):
         stats['errors'].extend(summary_stats['errors'])
         
         logger.info(f"✅ {summary_stats['success_count']}개 요약 생성 완료 ({summary_stats['failed_count']}개 실패)")
+        
+        # ========== 단계 3.5: 백일공부 학습 메모 생성 (선택) ==========
+        enable_study_notes = os.getenv('ENABLE_STUDY_NOTES', 'true').lower() == 'true'
+        if enable_study_notes:
+            logger.info("[3.5/4] 백일공부 학습 메모 생성 중...")
+            note_stats = generate_study_notes(today_str, candidates, db)
+            stats['study_notes_generated'] = note_stats['success_count']
+            stats['errors'].extend(note_stats['errors'])
+            logger.info(f"✅ {note_stats['success_count']}개 학습 메모 생성 완료 ({note_stats['failed_count']}개 실패)")
+        else:
+            logger.info("[3.5/4] 백일공부 학습 메모 건너뜀 (ENABLE_STUDY_NOTES=false)")
         
         # ========== 단계 4: Google Sheets 백업 (옵션) ==========
         if study_mode in ['gsheet', 'both']:
@@ -363,6 +409,216 @@ def generate_summaries(run_date: str, candidates: List[Dict],
     }
 
 
+def generate_study_notes(run_date: str, candidates: List[Dict], 
+                        db: StudyDatabase) -> Dict:
+    """
+    백일공부 학습 메모 생성 (사실 검증 → 학습 포인트 추출)
+    
+    Returns:
+        {'success_count': int, 'failed_count': int, 'errors': []}
+    """
+    api_key = os.getenv('GEMINI_API_KEY')
+    if not api_key:
+        logger.warning("GEMINI_API_KEY not found. Skipping study notes.")
+        return {'success_count': 0, 'failed_count': 0, 'errors': ['No API key']}
+    
+    success_count = 0
+    failed_count = 0
+    errors = []
+    
+    # 학습 메모가 필요한 종목만 필터링
+    stocks_to_note = []
+    for candidate in candidates:
+        ticker = candidate['ticker']
+        
+        # 이미 학습 메모가 있는지 확인
+        if db.has_study_note(run_date, ticker):
+            logger.debug(f"Study note already exists for {ticker}, skipping")
+            continue
+        
+        # 뉴스가 있는 종목만 처리
+        news_items = db.get_news_items(run_date, ticker)
+        if not news_items:
+            continue
+        
+        stocks_to_note.append({
+            'ticker': ticker,
+            'name': candidate['name'],
+            'news_count': len(news_items)
+        })
+    
+    if not stocks_to_note:
+        logger.info("No new study notes needed")
+        return {'success_count': 0, 'failed_count': 0, 'errors': []}
+    
+    # Gemini API 설정
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        
+        # 배치 크기 (학습 메모는 더 신중하게 3개씩)
+        batch_size = 3
+        
+        # 배치 단위로 처리
+        for i in range(0, len(stocks_to_note), batch_size):
+            batch = stocks_to_note[i:i + batch_size]
+            
+            logger.info(f"배치 학습 메모 생성 중 ({i+1}-{i+len(batch)}/{len(stocks_to_note)})")
+            
+            try:
+                notes = get_batch_study_notes_gemini(batch, model, run_date, db)
+                
+                for ticker, note_data in notes.items():
+                    if note_data['success']:
+                        success_count += 1
+                        logger.info(f"✓ {ticker}: 학습 메모 생성 완료 (신뢰도: {note_data.get('confidence', 'unknown')})")
+                    else:
+                        failed_count += 1
+                        errors.append(f"Study note failed for {ticker}")
+                
+                # Rate limiting (학습 메모는 더 보수적으로)
+                time.sleep(3)
+            
+            except Exception as e:
+                logger.error(f"Batch study note failed: {e}")
+                failed_count += len(batch)
+                errors.append(f"Batch study note error: {e}")
+    
+    except Exception as e:
+        logger.error(f"Gemini API setup failed: {e}", exc_info=True)
+        errors.append(f"Gemini setup failed: {e}")
+    
+    return {
+        'success_count': success_count,
+        'failed_count': failed_count,
+        'errors': errors
+    }
+
+
+def get_batch_study_notes_gemini(stocks: List[Dict], model, run_date: str,
+                                 db: StudyDatabase) -> Dict:
+    """
+    Gemini API로 백일공부 학습 메모 배치 생성
+    
+    백일공부 철학:
+    1. 사실 수집 → 2. 사실 요약 → 3. 검증 → 4. 학습 메모 → 5. 신뢰도 평가
+    
+    Returns:
+        {ticker: {'success': bool, 'confidence': str}, ...}
+    """
+    results = {}
+    
+    try:
+        # 각 종목의 뉴스 데이터 수집
+        stock_news_map = {}
+        for stock in stocks:
+            ticker = stock['ticker']
+            news_items = db.get_news_items(run_date, ticker)
+            
+            # 뉴스 제목과 요약만 추출
+            news_texts = []
+            for news in news_items[:10]:  # 최대 10개만 사용
+                news_texts.append(f"- [{news.get('publisher', '출처불명')}] {news['title']}: {news.get('snippet', '')}")
+            
+            stock_news_map[ticker] = {
+                'name': stock['name'],
+                'news_texts': '\n'.join(news_texts) if news_texts else '(뉴스 없음)'
+            }
+        
+        # 프롬프트 구성 (백일공부 철학 반영)
+        stock_sections = []
+        for ticker, info in stock_news_map.items():
+            stock_sections.append(
+                f"### {info['name']} ({ticker})\n"
+                f"관련 뉴스:\n{info['news_texts']}\n"
+            )
+        
+        stocks_text = "\n".join(stock_sections)
+        
+        prompt = f"""당신은 "주식 공부용 학습 메모"를 작성하는 AI입니다. 
+아래 종목들에 대해 뉴스를 분석하고, 각 종목마다 다음 형식의 JSON을 생성하세요:
+
+**백일공부 원칙:**
+1. 사실만 추출 (추측/예측 금지)
+2. 여러 기사에서 공통으로 반복되는 내용만 요약
+3. 학습 메모는 "이 종목에서 배울 점"을 일반화된 문장으로 작성
+4. 신뢰도 평가: high(3개 이상 기사 일치), mid(2개 기사 일치), low(단일 기사 또는 불명확)
+
+**출력 형식 (JSON):**
+```json
+{{
+  "종목코드": {{
+    "factual_summary": "여러 기사에서 공통으로 언급된 사실만 2-3문장으로 요약. 단일 기사 주장은 제외.",
+    "ai_learning_note": "이 종목에서 배울 수 있는 일반화된 교훈. 특정 종목명 언급 금지. 다음에 비슷한 패턴을 만났을 때 체크할 조건 포함. 감정/예측/권유 금지.",
+    "ai_confidence": "high 또는 mid 또는 low",
+    "verification_status": "기사 간 내용 일치 여부 또는 '확인 필요' 메시지"
+  }}
+}}
+```
+
+**예시:**
+```json
+{{
+  "123456": {{
+    "factual_summary": "복수의 언론사가 A사와의 계약 체결을 보도. 계약 규모는 100억원으로 일치.",
+    "ai_learning_note": "주요 고객사와의 대규모 계약 체결 시 단기 급등 가능성. 계약 규모, 고객사 신뢰도, 기존 매출 대비 비중 확인 필요.",
+    "ai_confidence": "high",
+    "verification_status": "3개 언론사 보도 내용 일치"
+  }}
+}}
+```
+
+**분석할 종목:**
+{stocks_text}
+
+**중요:** JSON만 출력하세요. 다른 설명은 불필요합니다.
+"""
+        
+        response = model.generate_content(prompt)
+        response_text = response.text.strip()
+        
+        # JSON 파싱
+        response_text = response_text.replace("```json", "").replace("```", "").strip()
+        start_idx = response_text.find('{')
+        end_idx = response_text.rfind('}')
+        
+        if start_idx != -1 and end_idx != -1:
+            json_text = response_text[start_idx:end_idx+1]
+            json_response = json.loads(json_text)
+            
+            # DB에 저장
+            for ticker, note_data in json_response.items():
+                try:
+                    db.insert_study_note({
+                        'run_date': run_date,
+                        'ticker': ticker,
+                        'factual_summary': note_data.get('factual_summary'),
+                        'ai_learning_note': note_data.get('ai_learning_note'),
+                        'ai_confidence': note_data.get('ai_confidence', 'low'),
+                        'verification_status': note_data.get('verification_status')
+                    })
+                    
+                    results[ticker] = {
+                        'success': True, 
+                        'confidence': note_data.get('ai_confidence', 'unknown')
+                    }
+                
+                except Exception as e:
+                    logger.error(f"Failed to save study note for {ticker}: {e}")
+                    results[ticker] = {'success': False}
+        else:
+            logger.warning("Gemini 응답에서 JSON을 찾을 수 없습니다")
+            for stock in stocks:
+                results[stock['ticker']] = {'success': False}
+    
+    except Exception as e:
+        logger.error(f"Batch study note generation failed: {e}", exc_info=True)
+        for stock in stocks:
+            results[stock['ticker']] = {'success': False}
+    
+    return results
+
+
 def get_batch_summaries_gemini(stocks: List[Dict], model, run_date: str, 
                                db: StudyDatabase) -> Dict:
     """
@@ -524,7 +780,17 @@ def send_completion_notification(run_date: str, stats: Dict, notifier, db: Study
 
 if __name__ == '__main__':
     import argparse
+    from pathlib import Path
+    from dotenv import load_dotenv
     from .notifier import Notifier
+    
+    # .env 파일 명시적 로드
+    env_path = Path(__file__).parent.parent.parent / 'configs' / '.env'
+    if env_path.exists():
+        load_dotenv(env_path)
+        print(f"✅ .env 파일 로드 완료: {env_path}")
+    else:
+        print(f"⚠️ .env 파일을 찾을 수 없습니다: {env_path}")
     
     parser = argparse.ArgumentParser(description='유목민 공부법 수동 실행')
     parser.add_argument('--force', action='store_true', help='강제 실행 (중복 무시)')
@@ -537,8 +803,8 @@ if __name__ == '__main__':
     notifier = Notifier()
     
     if args.date:
-        # 특정 날짜로 실행 (미구현 - 향후 확장 가능)
-        print(f"특정 날짜 실행 기능은 향후 구현 예정: {args.date}")
+        # 특정 날짜로 실행
+        run_daily_study(None, notifier, force_run=args.force, target_date=args.date)
     else:
-        # 오늘 날짜로 실행
+        # 최근 거래일로 실행
         run_daily_study(None, notifier, force_run=args.force)

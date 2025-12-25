@@ -80,13 +80,13 @@ class NaverNewsProvider(NewsProvider):
         news_items = []
         
         try:
-            # 날짜 필터 (최근 1주일)
+            # 날짜 필터 (최근 1개월로 확장 - 백일공부용)
             if date:
                 target_date = datetime.strptime(date, '%Y%m%d')
             else:
                 target_date = datetime.now()
             
-            start_date = (target_date - timedelta(days=7)).strftime('%Y.%m.%d')
+            start_date = (target_date - timedelta(days=30)).strftime('%Y.%m.%d')
             end_date = target_date.strftime('%Y.%m.%d')
             
             # Naver 뉴스 검색 URL (모바일 버전이 더 파싱하기 쉬움)

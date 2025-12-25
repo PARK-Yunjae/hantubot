@@ -117,7 +117,23 @@ class StudyDatabase:
                 )
             """)
             
-            # 5. ticker_notes 테이블
+            # 5. study_notes 테이블 (백일공부 학습 메모)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS study_notes (
+                    run_date TEXT NOT NULL,
+                    ticker TEXT NOT NULL,
+                    factual_summary TEXT,
+                    ai_learning_note TEXT,
+                    ai_confidence TEXT CHECK(ai_confidence IN ('high', 'mid', 'low')),
+                    verification_status TEXT,
+                    human_note TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (run_date, ticker)
+                )
+            """)
+            
+            # 6. ticker_notes 테이블 (범용 메모)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS ticker_notes (
                     ticker TEXT PRIMARY KEY,
@@ -138,6 +154,10 @@ class StudyDatabase:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_summaries_date 
                 ON summaries(run_date)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_study_notes_date 
+                ON study_notes(run_date)
             """)
             
             logger.info("Database schema initialized successfully")
@@ -416,6 +436,63 @@ class StudyDatabase:
         """요약 존재 여부 확인 (캐싱용)"""
         return self.get_summary(run_date, ticker) is not None
     
+    # ==================== Study Notes 관리 (백일공부용) ====================
+    
+    def insert_study_note(self, note: Dict):
+        """
+        학습 메모 삽입 (백일공부용)
+        
+        Args:
+            note: 학습 메모 정보 딕셔너리
+                required keys: run_date, ticker
+                optional keys: factual_summary, ai_learning_note, ai_confidence,
+                              verification_status, human_note
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR REPLACE INTO study_notes
+                (run_date, ticker, factual_summary, ai_learning_note, 
+                 ai_confidence, verification_status, human_note, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                note['run_date'],
+                note['ticker'],
+                note.get('factual_summary'),
+                note.get('ai_learning_note'),
+                note.get('ai_confidence'),
+                note.get('verification_status'),
+                note.get('human_note'),
+                datetime.now().isoformat()
+            ))
+            logger.debug(f"Inserted study note for {note['ticker']}")
+    
+    def get_study_note(self, run_date: str, ticker: str) -> Optional[Dict]:
+        """특정 종목의 학습 메모 조회"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT * FROM study_notes
+                WHERE run_date = ? AND ticker = ?
+            """, (run_date, ticker))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    
+    def has_study_note(self, run_date: str, ticker: str) -> bool:
+        """학습 메모 존재 여부 확인"""
+        return self.get_study_note(run_date, ticker) is not None
+    
+    def update_human_note(self, run_date: str, ticker: str, human_note: str):
+        """인간 메모 업데이트"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE study_notes
+                SET human_note = ?, updated_at = ?
+                WHERE run_date = ? AND ticker = ?
+            """, (human_note, datetime.now().isoformat(), run_date, ticker))
+            logger.info(f"Updated human note for {ticker} on {run_date}")
+    
     # ==================== Notes 관리 ====================
     
     def save_note(self, ticker: str, note_text: str):
@@ -488,11 +565,19 @@ class StudyDatabase:
             summary_rows = cursor.fetchall()
             summaries_by_ticker = {row['ticker']: dict(row) for row in summary_rows}
             
+            # 학습 메모 (ticker별로 그룹화)
+            cursor.execute("""
+                SELECT * FROM study_notes WHERE run_date = ?
+            """, (run_date,))
+            note_rows = cursor.fetchall()
+            notes_by_ticker = {row['ticker']: dict(row) for row in note_rows}
+            
             return {
                 'run_info': run_info,
                 'candidates': candidates,
                 'news': news_by_ticker,
-                'summaries': summaries_by_ticker
+                'summaries': summaries_by_ticker,
+                'study_notes': notes_by_ticker
             }
     
     def get_all_run_dates(self, limit: int = 100) -> List[str]:

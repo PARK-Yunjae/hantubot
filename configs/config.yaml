@@ -162,17 +162,3 @@ risk_management:
   emergency_stop: false
   # 주문 처리 중 에러 발생 시 시스템을 즉시 중단할지 여부.
   halt_on_error: true
-
-# ------------------------------------------------------------------------------
-
-# 테스트 전용 설정 (주의: 실전 투자 시에는 모두 false 또는 주석 처리)
-testing:
-  # true일 경우, 아래에 지정된 전략/종목으로 1회성 가짜 매수 신호를 발생시켜
-  # 전체 매매 파이프라인(주문->체결->로깅)을 테스트합니다.
-  force_signal_enabled: false
-  
-  # 가짜 신호를 발생시킬 전략의 ID
-  force_signal_strategy_id: 'volume_spike_strategy'
-  
-  # 가짜 신호로 매수할 종목 코드
-  force_signal_symbol: '005930' # 삼성전자
