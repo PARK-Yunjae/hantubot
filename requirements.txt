@@ -25,3 +25,7 @@ gspread-dataframe
 google-auth-oauthlib
 google-genai
 google-generativeai
+
+# Streamlit Dashboard
+streamlit
+plotly

@@ -1,71 +1,403 @@
 # hantubot_prod/hantubot/reporting/study.py
+"""
+유목민 공부법 (100일 공부) - SQLite + 뉴스 수집 + LLM 요약 통합 버전
+"""
 import os
 import time
-from datetime import datetime
-from typing import List, Dict
 import json
+from datetime import datetime
+from typing import List, Dict, Optional
 
-import gspread
-import pandas as pd
-from google.oauth2.service_account import Credentials
-from gspread_dataframe import set_with_dataframe
 from pykrx import stock
-import google.generativeai as genai  # 안정 버전 사용
+import google.generativeai as genai
 
 from .logger import get_logger
+from .study_db import get_study_db, StudyDatabase
+from ..utils.stock_filters import is_eligible_stock
+from ..providers import NaverNewsProvider
 
 logger = get_logger(__name__)
 
-# --- Configuration ---
-GSHEET_SCOPE = [
-    'https://www.googleapis.com/auth/spreadsheets',
-    'https://www.googleapis.com/auth/drive'
-]
-GSHEET_CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'configs', 'google_service_account.json')
-GSHEET_NAME = "시장 관심주 추적"
 
-# --- Gemini API Functions (Batch Optimized) ---
-def get_batch_summaries_with_gemini(stocks_to_summarize: List[Dict]) -> Dict[str, str]:
+def run_daily_study(broker, notifier, force_run=False):
     """
-    Uses the Gemini API to generate concise summaries for a batch of stocks in a single call.
-    Returns a dictionary mapping ticker to summary.
+    유목민 공부법 메인 함수 - SQLite 기반 데이터 수집 및 분석
+    
+    Args:
+        broker: 브로커 인스턴스 (미사용, 시그니처 호환성 유지)
+        notifier: 알림 인스턴스
+        force_run: True면 중복 체크 무시하고 강제 실행
     """
-    summaries = {stock['ticker']: "요약 생성 실패" for stock in stocks_to_summarize}
+    logger.info("=" * 80)
+    logger.info("유목민 공부법 (100일 공부) 시작 - SQLite + 뉴스 수집 버전")
+    logger.info("=" * 80)
+    
+    # 환경 변수 확인
+    study_mode = os.getenv('STUDY_MODE', 'sqlite')  # sqlite / gsheet / both
+    
+    # 날짜 설정
+    today_str = datetime.now().strftime("%Y%m%d")
+    today_date = datetime.now().strftime("%Y-%m-%d")
+    
+    # DB 초기화
+    try:
+        db = get_study_db()
+    except Exception as e:
+        logger.error(f"Failed to initialize database: {e}", exc_info=True)
+        notifier.send_alert(f"❌ 유목민 공부법 DB 초기화 실패: {e}", level='error')
+        return
+    
+    # 1. 중복 실행 체크
+    if not force_run:
+        existing_run = db.get_run(today_str)
+        if existing_run and existing_run['status'] in ['success', 'partial']:
+            logger.info(f"Today's study for {today_str} already completed. Skipping.")
+            return
+    
+    # 2. Run 시작
+    try:
+        run_id = db.start_run(today_str)
+        logger.info(f"Started new study run: {today_str} (run_id={run_id})")
+    except Exception as e:
+        logger.error(f"Failed to start run: {e}", exc_info=True)
+        notifier.send_alert(f"❌ 유목민 공부법 시작 실패: {e}", level='error')
+        return
+    
+    stats = {
+        'candidates': 0,
+        'news_collected': 0,
+        'summaries_generated': 0,
+        'errors': []
+    }
     
     try:
-        api_key = os.getenv('GEMINI_API_KEY')
-        if not api_key:
-            logger.warning("GEMINI_API_KEY not found in .env file. Skipping summary.")
-            return summaries
-
-        genai.configure(api_key=api_key)
-        # 무료 티어에서 사용 가능한 최신 안정 모델
-        model = genai.GenerativeModel('gemini-2.0-flash')
+        # ========== 단계 1: 시장 데이터 수집 ==========
+        logger.info("[1/4] 시장 데이터 수집 중...")
+        candidates = collect_market_data(today_str, db)
+        stats['candidates'] = len(candidates)
         
-        # Build a single prompt for all stocks
-        stock_list_str = "\n".join([f"- {s['name']} ({s['ticker']})" for s in stocks_to_summarize])
+        if not candidates:
+            logger.info("No candidates found for today. Ending run.")
+            db.end_run(today_str, 'success', stats=stats)
+            return
+        
+        logger.info(f"✅ {len(candidates)}개 후보 종목 발견 및 DB 저장 완료")
+        
+        # ========== 단계 2: 뉴스 수집 ==========
+        logger.info("[2/4] 뉴스 수집 중...")
+        news_stats = collect_news_for_candidates(today_str, candidates, db)
+        stats['news_collected'] = news_stats['total_news']
+        stats['errors'].extend(news_stats['errors'])
+        
+        logger.info(f"✅ {news_stats['total_news']}개 뉴스 수집 완료 ({news_stats['failed_tickers']}개 종목 실패)")
+        
+        # ========== 단계 3: LLM 요약 생성 ==========
+        logger.info("[3/4] LLM 요약 생성 중...")
+        summary_stats = generate_summaries(today_str, candidates, db)
+        stats['summaries_generated'] = summary_stats['success_count']
+        stats['errors'].extend(summary_stats['errors'])
+        
+        logger.info(f"✅ {summary_stats['success_count']}개 요약 생성 완료 ({summary_stats['failed_count']}개 실패)")
+        
+        # ========== 단계 4: Google Sheets 백업 (옵션) ==========
+        if study_mode in ['gsheet', 'both']:
+            logger.info("[4/4] Google Sheets 백업 중...")
+            try:
+                backup_to_gsheet(today_str, db, notifier)
+                logger.info("✅ Google Sheets 백업 완료")
+            except Exception as e:
+                logger.warning(f"Google Sheets 백업 실패 (무시됨): {e}")
+                stats['errors'].append(f"GSheet backup failed: {e}")
+        else:
+            logger.info("[4/4] Google Sheets 백업 건너뜀 (STUDY_MODE={study_mode})")
+        
+        # Run 성공 종료
+        final_status = 'success' if not stats['errors'] else 'partial'
+        db.end_run(today_str, final_status, stats=stats)
+        
+        # 완료 알림
+        send_completion_notification(today_str, stats, notifier, db)
+        
+        logger.info("=" * 80)
+        logger.info(f"유목민 공부법 완료: {final_status}")
+        logger.info("=" * 80)
+    
+    except Exception as e:
+        logger.error(f"유목민 공부법 실행 중 치명적 오류: {e}", exc_info=True)
+        db.end_run(today_str, 'fail', error_message=str(e), stats=stats)
+        notifier.send_alert(f"❌ 유목민 공부법 실패: {e}", level='error')
+
+
+# ==================== 단계별 함수 ====================
+
+def collect_market_data(run_date: str, db: StudyDatabase) -> List[Dict]:
+    """
+    시장 데이터 수집 및 후보 종목 필터링
+    
+    Returns:
+        후보 종목 리스트
+    """
+    candidates = []
+    
+    try:
+        # pykrx로 전체 종목 조회
+        df_all = stock.get_market_ohlcv_by_ticker(run_date, market="ALL")
+        
+        if df_all.empty:
+            logger.warning("No market data available for today")
+            return candidates
+        
+        # 필터: 거래량 천만주 OR 상한가(29%+)
+        volume_filter = df_all['거래량'] >= 10_000_000
+        price_ceil_filter = df_all['등락률'] >= 29.0
+        interesting_df = df_all[volume_filter | price_ceil_filter]
+        
+        if interesting_df.empty:
+            logger.info("No stocks met the criteria")
+            return candidates
+        
+        # ETF, 스팩 등 제외
+        unfiltered_tickers = interesting_df.index.tolist()
+        eligible_tickers = [
+            ticker for ticker in unfiltered_tickers
+            if is_eligible_stock(stock.get_market_ticker_name(ticker))
+        ]
+        
+        if not eligible_tickers:
+            logger.info("No eligible stocks after filtering")
+            return candidates
+        
+        # 거래대금 조회 (옵션)
+        try:
+            df_trading_value = stock.get_market_trading_value_by_ticker(run_date, market="ALL")
+        except:
+            df_trading_value = None
+        
+        # 후보 종목 정보 구성
+        for ticker in eligible_tickers:
+            try:
+                stock_info = interesting_df.loc[ticker]
+                stock_name = stock.get_market_ticker_name(ticker)
+                
+                # 시장 구분 (KOSPI/KOSDAQ)
+                market = stock.get_market_ticker_list(run_date, market="KOSPI")
+                market_type = "KOSPI" if ticker in market else "KOSDAQ"
+                
+                # 선정 사유
+                reasons = []
+                if stock_info['등락률'] >= 29.0:
+                    reasons.append('limit_up')
+                if stock_info['거래량'] >= 10_000_000:
+                    reasons.append('volume_10m')
+                reason_flag = ' / '.join(reasons) if reasons else 'both'
+                
+                # 거래대금
+                value_traded = None
+                if df_trading_value is not None and ticker in df_trading_value.index:
+                    value_traded = int(df_trading_value.loc[ticker, '거래대금'])
+                
+                candidate = {
+                    'run_date': run_date,
+                    'ticker': ticker,
+                    'name': stock_name,
+                    'market': market_type,
+                    'close_price': int(stock_info['종가']),
+                    'change_pct': float(stock_info['등락률']),
+                    'volume': int(stock_info['거래량']),
+                    'value_traded': value_traded,
+                    'reason_flag': reason_flag
+                }
+                
+                candidates.append(candidate)
+            
+            except Exception as e:
+                logger.error(f"Failed to process ticker {ticker}: {e}")
+                continue
+        
+        # DB에 일괄 저장
+        if candidates:
+            db.insert_candidates(candidates)
+            logger.info(f"Inserted {len(candidates)} candidates into database")
+    
+    except Exception as e:
+        logger.error(f"Market data collection failed: {e}", exc_info=True)
+        raise  # 시장 데이터 실패는 전체 run 중단
+    
+    return candidates
+
+
+def collect_news_for_candidates(run_date: str, candidates: List[Dict], 
+                                 db: StudyDatabase) -> Dict:
+    """
+    후보 종목들의 뉴스 수집
+    
+    Returns:
+        {'total_news': int, 'failed_tickers': int, 'errors': []}
+    """
+    news_provider = NaverNewsProvider(max_items_per_ticker=20)
+    
+    total_news = 0
+    failed_tickers = 0
+    errors = []
+    
+    for candidate in candidates:
+        ticker = candidate['ticker']
+        stock_name = candidate['name']
+        
+        try:
+            logger.info(f"뉴스 수집 중: {stock_name} ({ticker})")
+            
+            # 뉴스 수집
+            news_items = news_provider.fetch_news(ticker, stock_name, run_date)
+            
+            if news_items:
+                # run_date 및 ticker 추가
+                for item in news_items:
+                    item['run_date'] = run_date
+                    item['ticker'] = ticker
+                
+                # DB 저장
+                db.insert_news_items(news_items)
+                total_news += len(news_items)
+                
+                # 상태 업데이트
+                db.update_candidate_status(run_date, ticker, 'news_collected')
+                logger.debug(f"✓ {ticker}: {len(news_items)}개 뉴스 수집")
+            else:
+                logger.warning(f"✗ {ticker}: 뉴스 없음")
+                db.update_candidate_status(run_date, ticker, 'no_news')
+            
+            # Rate limiting
+            time.sleep(0.3)
+        
+        except Exception as e:
+            logger.error(f"뉴스 수집 실패: {ticker} - {e}")
+            db.update_candidate_status(run_date, ticker, 'news_failed')
+            failed_tickers += 1
+            errors.append(f"News collection failed for {ticker}: {e}")
+    
+    return {
+        'total_news': total_news,
+        'failed_tickers': failed_tickers,
+        'errors': errors
+    }
+
+
+def generate_summaries(run_date: str, candidates: List[Dict], 
+                      db: StudyDatabase) -> Dict:
+    """
+    LLM으로 종목 요약 생성 (배치 처리)
+    
+    Returns:
+        {'success_count': int, 'failed_count': int, 'errors': []}
+    """
+    api_key = os.getenv('GEMINI_API_KEY')
+    if not api_key:
+        logger.warning("GEMINI_API_KEY not found. Skipping summaries.")
+        return {'success_count': 0, 'failed_count': 0, 'errors': ['No API key']}
+    
+    success_count = 0
+    failed_count = 0
+    errors = []
+    
+    # 요약이 필요한 종목만 필터링 (캐싱)
+    stocks_to_summarize = []
+    for candidate in candidates:
+        ticker = candidate['ticker']
+        
+        # 이미 요약이 있는지 확인
+        if db.has_summary(run_date, ticker):
+            logger.debug(f"Summary already exists for {ticker}, skipping")
+            continue
+        
+        stocks_to_summarize.append({
+            'ticker': ticker,
+            'name': candidate['name']
+        })
+    
+    if not stocks_to_summarize:
+        logger.info("No new summaries needed (all cached)")
+        return {'success_count': 0, 'failed_count': 0, 'errors': []}
+    
+    # Gemini API 설정
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        
+        # 배치 크기 설정
+        batch_size = int(os.getenv('LLM_BATCH_SIZE', '10'))
+        
+        # 배치 단위로 처리
+        for i in range(0, len(stocks_to_summarize), batch_size):
+            batch = stocks_to_summarize[i:i + batch_size]
+            
+            logger.info(f"배치 요약 생성 중 ({i+1}-{i+len(batch)}/{len(stocks_to_summarize)})")
+            
+            try:
+                summaries = get_batch_summaries_gemini(batch, model, run_date, db)
+                
+                for ticker, summary_data in summaries.items():
+                    if summary_data['success']:
+                        success_count += 1
+                        db.update_candidate_status(run_date, ticker, 'summarized')
+                    else:
+                        failed_count += 1
+                        errors.append(f"Summary failed for {ticker}")
+                
+                # Rate limiting
+                time.sleep(2)
+            
+            except Exception as e:
+                logger.error(f"Batch summary failed: {e}")
+                failed_count += len(batch)
+                errors.append(f"Batch summary error: {e}")
+    
+    except Exception as e:
+        logger.error(f"Gemini API setup failed: {e}", exc_info=True)
+        errors.append(f"Gemini setup failed: {e}")
+    
+    return {
+        'success_count': success_count,
+        'failed_count': failed_count,
+        'errors': errors
+    }
+
+
+def get_batch_summaries_gemini(stocks: List[Dict], model, run_date: str, 
+                               db: StudyDatabase) -> Dict:
+    """
+    Gemini API로 배치 요약 생성
+    
+    Returns:
+        {ticker: {'success': bool, 'summary': str}, ...}
+    """
+    results = {}
+    
+    try:
+        # 프롬프트 구성
+        stock_list_str = "\n".join([f"- {s['name']} ({s['ticker']})" for s in stocks])
+        
         prompt = (
-            "아래 주식 종목들에 대해, 각각의 핵심 사업 내용을 한국어로 2~3 문장으로 요약해줘.\n"
-            "각 문장 끝에는 줄바꿈 문자(\\n)를 포함해서 가독성을 높여줘.\n"
-            "결과는 반드시 아래와 같은 JSON 형식으로 '종목코드': '요약' 형태로 제공해줘. 다른 설명은 모두 제외해줘.\n"
+            "아래 주식 종목들에 대해, 각각을 **한국어로 3~5문장**으로 요약해줘.\n"
+            "각 종목마다:\n"
+            "1) 핵심 사업 분야\n"
+            "2) 최근 주가 상승/주목받는 이유 (있다면)\n"
+            "3) 주요 고객사 또는 경쟁력\n\n"
+            "결과는 **반드시 아래 JSON 형식**으로만 응답해줘:\n"
             "```json\n"
             "{\n"
-            '  "005930": "세계적인 종합 반도체 기업으로, 메모리 반도체와 시스템 LSI 사업을 영위함.\n스마트폰, TV, 가전제품 등 다양한 전자제품을 생산 및 판매하며 글로벌 IT 시장을 선도함.",\n'
-            '  "000660": "DRAM, 낸드플래시 등 메모리 반도체를 주력으로 생산하는 기업임.\n서버, 모바일, PC 등 다양한 IT 기기에 필수적인 부품을 공급하며 기술 경쟁력을 확보하고 있음."\n'
+            '  "종목코드": "요약 내용 (줄바꿈 포함)",\n'
+            "  ...\n"
             "}\n"
             "```\n\n"
-            f"요약할 종목 목록:\n{stock_list_str}"
+            f"요약할 종목:\n{stock_list_str}"
         )
         
         response = model.generate_content(prompt)
-        
-        # Clean up and parse the JSON response
         response_text = response.text.strip()
         
-        # Remove markdown code blocks
+        # JSON 파싱
         response_text = response_text.replace("```json", "").replace("```", "").strip()
-        
-        # Find JSON content (sometimes Gemini adds extra text)
         start_idx = response_text.find('{')
         end_idx = response_text.rfind('}')
         
@@ -73,177 +405,140 @@ def get_batch_summaries_with_gemini(stocks_to_summarize: List[Dict]) -> Dict[str
             json_text = response_text[start_idx:end_idx+1]
             json_response = json.loads(json_text)
             
-            # Gemini might return summaries for different tickers, so we update our dict safely
-            for ticker, summary in json_response.items():
-                if ticker in summaries:
-                    summaries[ticker] = summary
-            
-            logger.info(f"Successfully generated summaries for {len(json_response)} stocks in a single batch call.")
+            # DB에 저장
+            for ticker, summary_text in json_response.items():
+                try:
+                    db.insert_summary({
+                        'run_date': run_date,
+                        'ticker': ticker,
+                        'summary_text': summary_text,
+                        'llm_provider': 'gemini',
+                        'llm_model': 'gemini-2.0-flash-exp'
+                    })
+                    
+                    results[ticker] = {'success': True, 'summary': summary_text}
+                
+                except Exception as e:
+                    logger.error(f"Failed to save summary for {ticker}: {e}")
+                    results[ticker] = {'success': False}
         else:
-            logger.warning("Gemini 응답에서 JSON을 찾을 수 없습니다.")
-        
-        return summaries
-
-    except Exception as e:
-        logger.error(f"Failed to get batch company summaries using Gemini API: {e}", exc_info=True)
-        return summaries
-
-
-# --- Google Sheets Functions ---
-def get_gsheet_client():
-    """Authenticate with Google and return the gspread client."""
-    if not os.path.exists(GSHEET_CONFIG_PATH):
-        raise FileNotFoundError(f"Google Service Account key not found at {GSHEET_CONFIG_PATH}")
-    creds = Credentials.from_service_account_file(GSHEET_CONFIG_PATH, scopes=GSHEET_SCOPE)
-    return gspread.authorize(creds)
-
-def get_worksheet_or_create(spreadsheet: gspread.Spreadsheet, name: str):
-    """Get a worksheet by name, or create it if it doesn't exist."""
-    try:
-        return spreadsheet.worksheet(name)
-    except gspread.WorksheetNotFound:
-        logger.info(f"Worksheet '{name}' not found, creating it.")
-        return spreadsheet.add_worksheet(title=name, rows=1, cols=1)
-
-# --- Main Study Logic ---
-def run_daily_study(broker, notifier, force_run=False):
-    """
-    "100일 공부" 리서치 루틴: Google Sheets & Gemini API 완전 자동화 버전
+            logger.warning("Gemini 응답에서 JSON을 찾을 수 없습니다")
+            for stock in stocks:
+                results[stock['ticker']] = {'success': False}
     
-    Args:
-        broker: 브로커 인스턴스
-        notifier: 알림 인스턴스
-        force_run: True면 중복 체크 무시하고 강제 실행
-    """
-    logger.info("Running daily study: Fully Automated GSheet + Gemini Edition...")
-    today_str = datetime.now().strftime("%Y%m%d")
-    today_date_str_for_check = datetime.now().strftime("%Y-%m-%d")
+    except Exception as e:
+        logger.error(f"Batch summary generation failed: {e}", exc_info=True)
+        for stock in stocks:
+            results[stock['ticker']] = {'success': False}
+    
+    return results
 
-    # 1. Connect to Google Sheets and check for duplicates FIRST
+
+def backup_to_gsheet(run_date: str, db: StudyDatabase, notifier):
+    """Google Sheets 백업 (옵션)"""
     try:
+        from .study_legacy import get_gsheet_client, get_worksheet_or_create
+        from gspread_dataframe import set_with_dataframe
+        import pandas as pd
+        
+        # 데이터 조회
+        data = db.get_full_study_data(run_date)
+        candidates = data['candidates']
+        summaries = data['summaries']
+        
+        if not candidates:
+            return
+        
+        # DataFrame 구성
+        records = []
+        for candidate in candidates:
+            ticker = candidate['ticker']
+            summary = summaries.get(ticker, {})
+            
+            records.append({
+                '날짜': run_date,
+                '종목코드': ticker,
+                '종목명': candidate['name'],
+                '선정사유': candidate['reason_flag'],
+                '종가': f"{candidate['close_price']:,}",
+                '등락률': f"{candidate['change_pct']:.2f}%",
+                '거래량': f"{candidate['volume']:,}",
+                '기업개요': summary.get('summary_text', '요약 없음')
+            })
+        
+        # Google Sheets 업데이트
         gsheet_client = get_gsheet_client()
-        spreadsheet = gsheet_client.open(GSHEET_NAME)
+        spreadsheet = gsheet_client.open("시장 관심주 추적")
         log_ws = get_worksheet_or_create(spreadsheet, "DailyLog")
         
+        # 기존 데이터와 병합
         existing_df = pd.DataFrame(log_ws.get_all_records())
-        if not force_run and not existing_df.empty and today_date_str_for_check in existing_df['날짜'].values:
-            logger.info(f"Today's study for {today_date_str_for_check} has already been completed. Skipping.")
-            return
-
-        freq_ws = get_worksheet_or_create(spreadsheet, "Frequency_Analysis")
-    except Exception as e:
-        logger.error(f"Failed to connect to Google Sheets for pre-check: {e}", exc_info=True)
-        notifier.send_alert(f"Google Sheets 연결 실패 (사전 확인): {e}", level='error')
-        return
-
-    # 2. Fetch interesting stocks from pykrx
-    try:
-        df_all = stock.get_market_ohlcv_by_ticker(today_str, market="ALL")
-        volume_filter = df_all['거래량'] >= 10_000_000
-        price_ceil_filter = df_all['등락률'] >= 29.0
-        interesting_tickers_df = df_all[volume_filter | price_ceil_filter]
+        new_df = pd.DataFrame(records).astype(str)
         
-        if interesting_tickers_df.empty:
-            logger.info("No stocks met the criteria for daily study today.")
-            return
-        
-        # [수정] ETF, 스팩 등 제외 필터링 적용
-        from ..utils.stock_filters import is_eligible_stock
-        
-        unfiltered_tickers = interesting_tickers_df.index.tolist()
-        interesting_tickers = [
-            ticker for ticker in unfiltered_tickers 
-            if is_eligible_stock(stock.get_market_ticker_name(ticker))
-        ]
-        
-        if not interesting_tickers:
-            logger.info("필터링된 종목이 없어 데일리 스터디 대상이 없습니다.")
-            return
-            
-        logger.info(f"필터링 후 데일리 스터디 대상 적격 종목 {len(interesting_tickers)}개 발견.")
-        df_funda = stock.get_market_fundamental_by_ticker(today_str)
-    except Exception as e:
-        logger.error(f"Failed to fetch stocks for daily study from pykrx: {e}", exc_info=True)
-        return
-
-    # 3. Get all summaries in one batch call
-    stocks_to_summarize = [{'ticker': t, 'name': stock.get_market_ticker_name(t)} for t in interesting_tickers]
-    all_summaries = get_batch_summaries_with_gemini(stocks_to_summarize)
-    time.sleep(15) # Respect potential API rate limits after a large call
-
-    # 4. Process each stock and gather data
-    daily_records = []
-    for ticker in interesting_tickers:
-        try:
-            stock_info = interesting_tickers_df.loc[ticker]
-            stock_name = stock.get_market_ticker_name(ticker)
-            
-            company_summary = all_summaries.get(ticker, "요약 없음.")
-            
-            reason = ", ".join([r for r, c in [("거래량천만", stock_info['거래량'] >= 10_000_000), ("상한가", stock_info['등락률'] >= 29.0)] if c])
-
-            # 간소화된 컬럼 (재무지표 제외)
-            daily_records.append({
-                "날짜": today_date_str_for_check,
-                "종목코드": ticker,
-                "종목명": stock_name,
-                "선정사유": reason,
-                "종가": f"{stock_info['종가']:,}",
-                "등락률": f"{stock_info['등락률']:.2f}%",
-                "거래량": f"{stock_info['거래량']:,}",
-                "기업개요": company_summary,
-            })
-        except Exception as e:
-            logger.error(f"Failed to process {ticker} for GSheet: {e}")
-
-    if not daily_records:
-        logger.info("No records to update to Google Sheets.")
-        return
-        
-    # 5. Update Google Sheets
-    try:
-        new_df = pd.DataFrame(daily_records)
         if not existing_df.empty:
             combined_df = pd.concat([existing_df, new_df], ignore_index=True)
         else:
             combined_df = new_df
         
-        # Ensure all data is string to avoid gspread issues
-        combined_df = combined_df.astype(str)
-
         set_with_dataframe(log_ws, combined_df, include_index=False, resize=True)
-        logger.info(f"Appended {len(new_df)} new records to 'DailyLog' worksheet.")
-        
-        # 자동 열 너비 조정 (내용에 맞게)
-        try:
-            # 모든 열에 대해 자동 크기 조정 요청
-            num_cols = len(combined_df.columns)
-            log_ws.columns_auto_resize(0, num_cols - 1)
-            logger.info("열 너비 자동 조정 완료.")
-        except Exception as e:
-            logger.warning(f"열 너비 자동 조정 실패 (무시 가능): {e}")
-
-        # Update Frequency Analysis using Korean column name
-        freq_counts = combined_df['종목명'].value_counts().reset_index()
-        freq_counts.columns = ['종목명', '등장횟수']
-        set_with_dataframe(freq_ws, freq_counts, include_index=False, resize=True)
-        logger.info("Updated 'Frequency_Analysis' worksheet.")
-        
-        # Frequency 시트도 자동 크기 조정
-        try:
-            freq_ws.columns_auto_resize(0, 1)
-            logger.info("Frequency 시트 열 너비 자동 조정 완료.")
-        except Exception as e:
-            logger.warning(f"Frequency 시트 열 너비 자동 조정 실패 (무시 가능): {e}")
-
-        summary_fields = [{"name": f"- {rec['종목명']} ({rec['종목코드']})", "value": f"이유: {rec['선정사유']}", "inline": False} for rec in daily_records[:5]]
-        embed = {"title": f"📝 유목민 공부법 리포트 -> GSheet 저장 완료", "description": f"금일의 관심 종목 **{len(daily_records)}개**가 자동 요약과 함께 Google Sheet에 저장되었습니다.", "color": 5814783, "fields": summary_fields}
-        notifier.send_alert("유목민 공부법 분석 완료", embed=embed)
-
+        logger.info(f"Backed up {len(records)} records to Google Sheets")
+    
     except Exception as e:
-        logger.error(f"Failed to update Google Sheets: {e}", exc_info=True)
-        notifier.send_alert(f"Google Sheets 업데이트 실패: {e}", level='error')
+        raise Exception(f"GSheet backup failed: {e}")
+
+
+def send_completion_notification(run_date: str, stats: Dict, notifier, db: StudyDatabase):
+    """완료 알림 발송"""
+    try:
+        # 상위 5개 종목 정보
+        candidates = db.get_candidates(run_date)[:5]
+        
+        fields = []
+        for candidate in candidates:
+            fields.append({
+                "name": f"📊 {candidate['name']} ({candidate['ticker']})",
+                "value": f"등락률: {candidate['change_pct']:.2f}% | 사유: {candidate['reason_flag']}",
+                "inline": False
+            })
+        
+        embed = {
+            "title": f"📚 유목민 공부법 완료 ({run_date})",
+            "description": (
+                f"✅ 후보 종목: **{stats['candidates']}개**\n"
+                f"📰 뉴스 수집: **{stats['news_collected']}개**\n"
+                f"🤖 AI 요약: **{stats['summaries_generated']}개**\n"
+                f"⚠️ 오류: **{len(stats['errors'])}건**"
+            ),
+            "color": 5814783,
+            "fields": fields,
+            "footer": {"text": f"SQLite DB 저장 완료 | 대시보드에서 확인 가능"}
+        }
+        
+        notifier.send_alert("유목민 공부법 완료", embed=embed)
+    
+    except Exception as e:
+        logger.error(f"Failed to send notification: {e}")
+
+
+# ==================== CLI 인터페이스 ====================
 
 if __name__ == '__main__':
-    # This test won't work without a mock for gspread and gemini
-    pass
+    import argparse
+    from .notifier import Notifier
+    
+    parser = argparse.ArgumentParser(description='유목민 공부법 수동 실행')
+    parser.add_argument('--force', action='store_true', help='강제 실행 (중복 무시)')
+    parser.add_argument('--date', type=str, help='특정 날짜 실행 (YYYYMMDD)')
+    parser.add_argument('--news-only', action='store_true', help='뉴스만 재수집')
+    
+    args = parser.parse_args()
+    
+    # Notifier 초기화
+    notifier = Notifier()
+    
+    if args.date:
+        # 특정 날짜로 실행 (미구현 - 향후 확장 가능)
+        print(f"특정 날짜 실행 기능은 향후 구현 예정: {args.date}")
+    else:
+        # 오늘 날짜로 실행
+        run_daily_study(None, notifier, force_run=args.force)
