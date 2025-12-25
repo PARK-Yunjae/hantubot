@@ -164,6 +164,16 @@ def run_daily_study(broker, notifier, force_run=False, target_date=None):
         # 완료 알림
         send_completion_notification(today_str, stats, notifier, db)
         
+        # ========== GitHub 자동 커밋 (옵션) ==========
+        enable_auto_commit = os.getenv('ENABLE_GIT_AUTO_COMMIT', 'true').lower() == 'true'
+        if enable_auto_commit:
+            try:
+                logger.info("[추가] GitHub 자동 커밋 중...")
+                auto_commit_to_github(today_str, stats)
+                logger.info("✅ GitHub 커밋 완료")
+            except Exception as e:
+                logger.warning(f"GitHub 자동 커밋 실패 (무시됨): {e}")
+        
         logger.info("=" * 80)
         logger.info(f"유목민 공부법 완료: {final_status}")
         logger.info("=" * 80)
@@ -365,13 +375,15 @@ def generate_summaries(run_date: str, candidates: List[Dict],
         logger.info("No new summaries needed (all cached)")
         return {'success_count': 0, 'failed_count': 0, 'errors': []}
     
-    # Gemini API 설정
+    # Gemini API 설정 - 2.5 Pro로 업그레이드 (더 정확한 요약)
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        model_name = os.getenv('GEMINI_MODEL', 'gemini-2.5-pro')
+        model = genai.GenerativeModel(model_name)
+        logger.info(f"Using Gemini model: {model_name}")
         
-        # 배치 크기 설정
-        batch_size = int(os.getenv('LLM_BATCH_SIZE', '10'))
+        # 배치 크기 설정 (Pro 모델은 더 느리므로 줄임)
+        batch_size = int(os.getenv('LLM_BATCH_SIZE', '5'))
         
         # 배치 단위로 처리
         for i in range(0, len(stocks_to_summarize), batch_size):
@@ -622,7 +634,7 @@ def get_batch_study_notes_gemini(stocks: List[Dict], model, run_date: str,
 def get_batch_summaries_gemini(stocks: List[Dict], model, run_date: str, 
                                db: StudyDatabase) -> Dict:
     """
-    Gemini API로 배치 요약 생성
+    Gemini API로 배치 요약 생성 (뉴스 기반 - 환각 방지)
     
     Returns:
         {ticker: {'success': bool, 'summary': str}, ...}
@@ -630,24 +642,53 @@ def get_batch_summaries_gemini(stocks: List[Dict], model, run_date: str,
     results = {}
     
     try:
-        # 프롬프트 구성
-        stock_list_str = "\n".join([f"- {s['name']} ({s['ticker']})" for s in stocks])
+        # 각 종목의 뉴스 데이터 수집 (환각 방지)
+        stock_news_map = {}
+        for stock in stocks:
+            ticker = stock['ticker']
+            news_items = db.get_news_items(run_date, ticker)
+            
+            # 뉴스 제목과 요약만 추출 (최대 5개)
+            news_texts = []
+            for news in news_items[:5]:
+                news_texts.append(f"- [{news.get('publisher', '')}] {news['title']}")
+                if news.get('snippet'):
+                    news_texts.append(f"  {news.get('snippet')}")
+            
+            stock_news_map[ticker] = {
+                'name': stock['name'],
+                'news_texts': '\n'.join(news_texts) if news_texts else '(뉴스 없음)'
+            }
         
-        prompt = (
-            "아래 주식 종목들에 대해, 각각을 **한국어로 3~5문장**으로 요약해줘.\n"
-            "각 종목마다:\n"
-            "1) 핵심 사업 분야\n"
-            "2) 최근 주가 상승/주목받는 이유 (있다면)\n"
-            "3) 주요 고객사 또는 경쟁력\n\n"
-            "결과는 **반드시 아래 JSON 형식**으로만 응답해줘:\n"
-            "```json\n"
-            "{\n"
-            '  "종목코드": "요약 내용 (줄바꿈 포함)",\n'
-            "  ...\n"
-            "}\n"
-            "```\n\n"
-            f"요약할 종목:\n{stock_list_str}"
-        )
+        # 프롬프트 구성 (뉴스 기반)
+        stock_sections = []
+        for ticker, info in stock_news_map.items():
+            stock_sections.append(
+                f"### {info['name']} ({ticker})\n"
+                f"관련 뉴스:\n{info['news_texts']}\n"
+            )
+        
+        stocks_text = "\n".join(stock_sections)
+        
+        prompt = f"""아래 종목들을 **수집된 뉴스 내용만을 근거로** 요약하세요.
+
+**중요:**
+- 뉴스가 없으면 "관련 뉴스 없음"이라고만 적으세요
+- 추측하지 말고 뉴스에 명시된 사실만 요약
+- 각 종목당 2-4문장
+
+**출력 형식 (JSON):**
+```json
+{{
+  "종목코드": "뉴스 기반 요약 내용"
+}}
+```
+
+**종목 및 뉴스:**
+{stocks_text}
+
+**JSON만 출력:**
+"""
         
         response = model.generate_content(prompt)
         response_text = response.text.strip()
@@ -741,6 +782,103 @@ def backup_to_gsheet(run_date: str, db: StudyDatabase, notifier):
     
     except Exception as e:
         raise Exception(f"GSheet backup failed: {e}")
+
+
+def auto_commit_to_github(run_date: str, stats: Dict):
+    """
+    GitHub 자동 커밋 및 푸시
+    
+    Args:
+        run_date: 실행 날짜 (YYYYMMDD)
+        stats: 실행 통계
+    """
+    import subprocess
+    from pathlib import Path
+    
+    try:
+        # Git 저장소 루트 경로
+        repo_root = Path(__file__).parent.parent.parent
+        
+        # data/study.db 파일이 있는지 확인
+        db_file = repo_root / 'data' / 'study.db'
+        if not db_file.exists():
+            logger.warning("study.db 파일이 없어 커밋 건너뜀")
+            return
+        
+        # Git add (Windows 인코딩 문제 해결)
+        result = subprocess.run(
+            ['git', 'add', 'data/study.db'],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='ignore',  # 디코딩 오류 무시
+            timeout=10
+        )
+        
+        if result.returncode != 0:
+            logger.warning(f"Git add 실패: {result.stderr}")
+            return
+        
+        # 변경사항이 있는지 확인 (Windows 인코딩 문제 해결)
+        result = subprocess.run(
+            ['git', 'diff', '--cached', '--quiet'],
+            cwd=repo_root,
+            capture_output=True,
+            encoding='utf-8',
+            errors='ignore',
+            timeout=10
+        )
+        
+        # returncode가 1이면 변경사항 있음, 0이면 변경사항 없음
+        if result.returncode == 0:
+            logger.info("변경사항이 없어 커밋 건너뜀")
+            return
+        
+        # Git commit (Windows 인코딩 문제 해결)
+        commit_message = (
+            f"📚 유목민 공부법 자동 업데이트 ({run_date})\n\n"
+            f"- 후보 종목: {stats['candidates']}개\n"
+            f"- 뉴스 수집: {stats['news_collected']}개\n"
+            f"- AI 요약: {stats['summaries_generated']}개"
+        )
+        
+        result = subprocess.run(
+            ['git', 'commit', '-m', commit_message],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='ignore',
+            timeout=10
+        )
+        
+        if result.returncode != 0:
+            logger.warning(f"Git commit 실패: {result.stderr}")
+            return
+        
+        logger.info(f"✓ Git commit 완료: {commit_message.split()[0]}")
+        
+        # Git push (실패해도 무시 - 네트워크 이슈 등, Windows 인코딩 문제 해결)
+        result = subprocess.run(
+            ['git', 'push'],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='ignore',
+            timeout=30
+        )
+        
+        if result.returncode == 0:
+            logger.info("✓ Git push 완료 → GitHub 업데이트됨")
+        else:
+            logger.warning(f"Git push 실패 (무시됨): {result.stderr}")
+    
+    except subprocess.TimeoutExpired:
+        logger.warning("Git 명령 타임아웃")
+    except Exception as e:
+        logger.warning(f"Git 자동 커밋 중 오류: {e}")
 
 
 def send_completion_notification(run_date: str, stats: Dict, notifier, db: StudyDatabase):
