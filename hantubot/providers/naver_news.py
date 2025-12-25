@@ -46,11 +46,13 @@ class NaverNewsProvider(NewsProvider):
         news_items = []
         
         try:
-            # 검색어 조합 (종목명 중심)
+            # 검색어 조합 (기업 분석 중심 - 급등/급락 제거)
             keywords = [
-                f"{stock_name}",
-                f"{stock_name} 주가",
-                f"{stock_name} 급등",
+                f"{stock_name}",           # 기본
+                f"{stock_name} 실적",      # 실적 정보
+                f"{stock_name} 신제품",    # 제품 출시
+                f"{stock_name} 계약",      # 수주/계약
+                f"{stock_name} 투자",      # 투자 유치
             ]
             
             # 중복 제거를 위한 URL 세트
@@ -139,12 +141,12 @@ class NaverNewsProvider(NewsProvider):
                             'title': title,
                             'url': item.get('link', ''),
                             'publisher': item.get('originallink', '').split('/')[2] if item.get('originallink') else 'Naver',
-                            'published_at': item.get('pubDate', ''),
+                            'published_at': self._format_date_korean(item.get('pubDate', '')),
                             'snippet': description
                         }
                         
-                        # 유효성 검사
-                        if self._validate_news_item(news_item):
+                        # 유효성 검사 + 저품질 필터링
+                        if self._validate_news_item(news_item) and self._is_quality_news(news_item):
                             news_items.append(news_item)
                     
                     except Exception as e:
@@ -182,6 +184,63 @@ class NaverNewsProvider(NewsProvider):
         text = html.unescape(text)
         
         return text.strip()
+    
+    def _format_date_korean(self, date_str: str) -> str:
+        """
+        영어 날짜를 한국식으로 변환
+        
+        Args:
+            date_str: RFC 822 형식 날짜 (예: "Mon, 25 Dec 2024 14:30:00 +0900")
+            
+        Returns:
+            한국식 날짜 (예: "2024년 12월 25일 14:30")
+        """
+        if not date_str:
+            return ""
+        
+        try:
+            from datetime import datetime
+            
+            # RFC 822 형식 파싱
+            dt = datetime.strptime(date_str, "%a, %d %b %Y %H:%M:%S %z")
+            
+            # 한국식으로 포맷팅
+            return dt.strftime("%Y년 %m월 %d일 %H:%M")
+        
+        except Exception as e:
+            # 파싱 실패 시 원본 반환
+            return date_str
+    
+    def _is_quality_news(self, news_item: Dict) -> bool:
+        """
+        저품질 뉴스 필터링
+        
+        주가 변동만 다루는 기사나 테마주 뉴스 등 학습 가치가 낮은 뉴스 제외
+        
+        Args:
+            news_item: 뉴스 아이템
+            
+        Returns:
+            품질이 좋으면 True, 나쁘면 False
+        """
+        title = news_item.get('title', '')
+        
+        # 제외할 키워드 (주가 변동 중심 뉴스)
+        exclude_keywords = [
+            '급등', '급락', '폭등', '폭락',
+            '상한가', '하한가',
+            '마감', '시초가', '장중',
+            '테마주', '관심주',
+            '보유', '매수', '매도', '추천',
+        ]
+        
+        # 제목에 제외 키워드가 있으면 거부
+        for keyword in exclude_keywords:
+            if keyword in title:
+                return False
+        
+        # 기본적으로 허용 (너무 많이 거르지 않기)
+        return True
     
     def fetch_news_detail(self, url: str) -> Optional[str]:
         """
