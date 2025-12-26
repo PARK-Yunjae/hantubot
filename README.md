@@ -572,11 +572,51 @@ reports/
 
 ---
 
-## 📚 추가 학습 자료
+## 📚 문서 구조
 
-- **[LEARNING_GUIDE.md](LEARNING_GUIDE.md)**: 파이썬 기초부터 전략 개발까지
+모든 문서가 `docs/` 폴더로 체계적으로 정리되었습니다.
+
+### 📁 Setup (초기 설정)
+- **[AUTO_BOOT_SETUP.md](docs/setup/AUTO_BOOT_SETUP.md)** - Windows 작업 스케줄러로 자동 시작 설정
+- **[EMAIL_SETUP.md](docs/setup/EMAIL_SETUP.md)** - Gmail 이메일 알림 설정 가이드
+- **[PYTHON_VERSION_GUIDE.md](docs/setup/PYTHON_VERSION_GUIDE.md)** - Python 버전별 설치 가이드
+- **[SETUP_AFTER_FORMAT.md](docs/setup/SETUP_AFTER_FORMAT.md)** - 포맷 후 재설정 체크리스트
+- **[VSCODE_SETUP.md](docs/setup/VSCODE_SETUP.md)** - VS Code 개발 환경 설정
+
+### 🚀 Deployment (배포)
+- **[DEPLOYMENT_GUIDE.md](docs/deployment/DEPLOYMENT_GUIDE.md)** - 실서버 배포 가이드
+- **[STREAMLIT_DEPLOY_GUIDE.md](docs/deployment/STREAMLIT_DEPLOY_GUIDE.md)** - Streamlit 대시보드 배포
+- **[STUDY_DEPLOYMENT.md](docs/deployment/STUDY_DEPLOYMENT.md)** - 유목민 공부법 시스템 배포
+
+### 📖 Guides (사용 가이드)
+- **[LEARNING_GUIDE.md](docs/guides/LEARNING_GUIDE.md)** - Python 기초부터 전략 개발까지
+- **[STUDY_GUIDE.md](docs/guides/STUDY_GUIDE.md)** - 유목민 공부법 상세 가이드
+- **[OPTIMIZATION_GUIDE.md](docs/guides/OPTIMIZATION_GUIDE.md)** - 시스템 최적화 완전 가이드 ⭐ NEW!
+
+### ✅ Verification (검증)
+- **[TRADING_SYSTEM_VERIFICATION.md](docs/verification/TRADING_SYSTEM_VERIFICATION.md)** - 매매 시스템 검증 결과
+- **[15_03_WORKFLOW_VERIFICATION.md](docs/verification/15_03_WORKFLOW_VERIFICATION.md)** - 종가 매매 워크플로우 검증
+- **[CRITICAL_BUGS_FOUND.md](docs/verification/CRITICAL_BUGS_FOUND.md)** - 발견된 버그 및 수정 내역
+
+### 🔧 Development (개발)
+- **[CHANGELOG.md](docs/development/CHANGELOG.md)** - 버전별 변경 이력
+- **[STUDY_UPGRADE_PLAN.md](docs/development/STUDY_UPGRADE_PLAN.md)** - 유목민 공부법 업그레이드 계획
+
+---
+
+## 🎓 빠른 시작
+
+### ⚡ 처음 사용하는 분
+1. **[QUICKSTART.md](docs/QUICKSTART.md)** - 10분 설치 + 설정 가이드 ⭐ 시작은 여기서!
+2. **[USER_TODO.md](USER_TODO.md)** - 월요일 실전 전 필수 체크리스트 📝
+3. **[INSPECTION_CHECKLIST.md](INSPECTION_CHECKLIST.md)** - 전수조사 50개 항목 🔍
+
+### 📚 추가 학습 자료
+
+- **[OPTIMIZATION_GUIDE.md](docs/guides/OPTIMIZATION_GUIDE.md)** - 🌟 최신! P0~P2 최적화 완전 가이드
+- **[LEARNING_GUIDE.md](docs/guides/LEARNING_GUIDE.md)** - 파이썬 기초부터 전략 개발까지
+- **[STUDY_GUIDE.md](docs/guides/STUDY_GUIDE.md)** - 유목민 공부법 상세 가이드
 - **[한국투자증권 API 문서](https://apiportal.koreainvestment.com)**
-- **[Discord 서버](https://discord.gg/xxxxx)**: 커뮤니티 (개설 예정)
 
 ---
 

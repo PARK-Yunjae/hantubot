@@ -4,6 +4,7 @@ import os
 import yaml
 from datetime import datetime
 import json
+from logging.handlers import RotatingFileHandler
 
 class CustomLogger:
     def __init__(self, name="hantubot", config_path="configs/config.yaml"):
@@ -39,12 +40,40 @@ class CustomLogger:
             console_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
             self.logger.addHandler(console_handler)
 
-            # File handler
+            # Rotating File handler (10MB, 5 backups)
             current_date_str = datetime.now().strftime('%Y-%m-%d')
             file_name = f"{self.logger.name}_{current_date_str}.log"
-            file_handler = logging.FileHandler(os.path.join(self.log_path, file_name), encoding='utf-8')
-            file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(name)s - %(message)s'))
-            self.logger.addHandler(file_handler)
+            rotating_handler = RotatingFileHandler(
+                os.path.join(self.log_path, file_name),
+                maxBytes=10485760,  # 10MB
+                backupCount=5,
+                encoding='utf-8'
+            )
+            rotating_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(name)s - %(message)s'))
+            self.logger.addHandler(rotating_handler)
+            
+            # Level-specific file handlers (WARNING, ERROR, CRITICAL)
+            # WARNING 이상 로그만 별도 파일에 저장
+            warning_handler = RotatingFileHandler(
+                os.path.join(self.log_path, f"{self.logger.name}_WARNING_{current_date_str}.log"),
+                maxBytes=5242880,  # 5MB
+                backupCount=3,
+                encoding='utf-8'
+            )
+            warning_handler.setLevel(logging.WARNING)
+            warning_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(name)s - %(message)s'))
+            self.logger.addHandler(warning_handler)
+            
+            # ERROR 이상 로그만 별도 파일에 저장
+            error_handler = RotatingFileHandler(
+                os.path.join(self.log_path, f"{self.logger.name}_ERROR_{current_date_str}.log"),
+                maxBytes=5242880,  # 5MB
+                backupCount=3,
+                encoding='utf-8'
+            )
+            error_handler.setLevel(logging.ERROR)
+            error_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(name)s - %(message)s - %(exc_info)s'))
+            self.logger.addHandler(error_handler)
 
         except FileNotFoundError:
             self.logger.error(f"Configuration file not found: {full_config_path}")
@@ -59,6 +88,7 @@ class CustomLogger:
 
 # Global logger instance (singleton pattern)
 _hantubot_logger_instance = None
+_email_handler_added = False
 
 def get_logger(name="hantubot") -> logging.Logger:
     """
@@ -66,10 +96,24 @@ def get_logger(name="hantubot") -> logging.Logger:
     최초 호출 시 로거를 초기화하고, 이후에는 기존 인스턴스를 반환합니다.
     name 인자는 로거의 하위 모듈 이름을 지정하는 데 사용됩니다.
     """
-    global _hantubot_logger_instance
+    global _hantubot_logger_instance, _email_handler_added
     if _hantubot_logger_instance is None:
         # Initial call sets up the root logger configuration
         _hantubot_logger_instance = CustomLogger("hantubot_root").get_logger()
+        
+        # EmailHandler 추가 (CRITICAL 로그를 이메일로 발송)
+        if not _email_handler_added:
+            try:
+                from ..utils.email_alert import EmailHandler
+                email_handler = EmailHandler()
+                email_handler.setLevel(logging.CRITICAL)
+                _hantubot_logger_instance.addHandler(email_handler)
+                _email_handler_added = True
+                _hantubot_logger_instance.info("✅ 이메일 알림 핸들러 추가 완료 (CRITICAL 로그)")
+            except ImportError:
+                _hantubot_logger_instance.warning("⚠️ EmailHandler를 불러올 수 없습니다 (email_alert.py 확인)")
+            except Exception as e:
+                _hantubot_logger_instance.warning(f"⚠️ EmailHandler 추가 실패: {e}")
     
     # Return a named logger that inherits settings from the root logger
     return logging.getLogger(name)
@@ -141,4 +185,3 @@ if __name__ == '__main__':
     signals_logger.info(signal_record)
     
     print("Log tests finished. Check 'logs' directory for trades_YYYY-MM-DD.jsonl and signals_YYYY-MM-DD.jsonl")
-

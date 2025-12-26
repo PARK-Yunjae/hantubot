@@ -451,6 +451,28 @@ class TradingEngine:
                     logger.debug("장이 마감되었습니다. 장 마감 후 로직 실행 중.")
                     await self._process_post_market_logic()
                     post_market_run_today = True
+                    
+                    # 15:40 자동 종료 체크
+                    auto_shutdown_enabled = os.getenv('AUTO_SHUTDOWN_ENABLED', 'false').lower() == 'true'
+                    shutdown_time_str = os.getenv('AUTO_SHUTDOWN_TIME', '15:40')
+                    
+                    if auto_shutdown_enabled:
+                        try:
+                            shutdown_hour, shutdown_minute = map(int, shutdown_time_str.split(':'))
+                            shutdown_time = dt.time(shutdown_hour, shutdown_minute)
+                            
+                            if now.time() >= shutdown_time:
+                                logger.info("=" * 80)
+                                logger.info(f"자동 종료 시간({shutdown_time_str})에 도달했습니다.")
+                                logger.info("일일 작업 완료 - 프로그램을 정상 종료합니다.")
+                                logger.info("=" * 80)
+                                self.notifier.send_alert("✅ Hantubot 일일 작업 완료 - 정상 종료", level='info')
+                                self._running = False
+                                break
+                            else:
+                                logger.info(f"자동 종료 예정: {shutdown_time_str} ({shutdown_time_str} - 현재 {now.strftime('%H:%M')})")
+                        except ValueError:
+                            logger.error(f"AUTO_SHUTDOWN_TIME 형식 오류: {shutdown_time_str} (HH:MM 형식 사용)")
             
             # 장 외 시간이거나, 비거래일이거나, 장 마감 후 로직을 이미 실행한 경우
             logger.debug("장외 시간이거나 비거래일입니다. 장시간 대기 준비 중.")

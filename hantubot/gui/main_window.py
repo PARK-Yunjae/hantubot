@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QRadioButton, QGroupBox, QCheckBox, QTextEdit, QLabel
 )
-from PySide6.QtCore import Qt, QThread, Signal, QObject
+from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer
 
 # --- Import Core Components ---
 # This assumes the project root is in PYTHONPATH, which run.py will handle.
@@ -111,10 +111,14 @@ class MainWindow(QMainWindow):
         self.engine_worker = None
         self.config = None
         
+        # .env 파일 먼저 로드 (자동 시작을 위해)
+        load_dotenv(dotenv_path=os.path.join(os.getcwd(), 'configs', '.env'))
+        
         self._setup_ui()
         self._connect_signals()
         self._configure_logging()
         self._load_initial_config()
+        self._check_auto_start()
 
     def _setup_ui(self):
         central_widget = QWidget()
@@ -198,6 +202,17 @@ class MainWindow(QMainWindow):
             self.append_log(f"CRITICAL: Configuration file not found at {config_path}")
         except Exception as e:
             self.append_log(f"CRITICAL: Error loading initial config: {e}")
+    
+    def _check_auto_start(self):
+        """자동 시작 옵션 확인 및 실행"""
+        auto_start = os.getenv('AUTO_START_ENGINE', 'false').lower() == 'true'
+        
+        if auto_start:
+            self.append_log("🚀 자동 시작 모드 활성화 - 1초 후 엔진 시작...")
+            # 1초 후 자동 시작
+            QTimer.singleShot(1000, self.start_engine)
+        else:
+            self.append_log("수동 시작 모드 - '엔진 시작' 버튼을 클릭하세요")
 
     def append_log(self, message):
         self.log_text_edit.append(message)

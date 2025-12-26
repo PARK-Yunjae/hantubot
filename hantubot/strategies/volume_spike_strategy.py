@@ -139,16 +139,16 @@ class VolumeSpikeStrategy(BaseStrategy):
 
                     if prev_rank > params['rank_jump_prev_threshold'] and rank <= params['rank_jump_buy_threshold']:
                         current_price = self.broker.get_current_price(symbol)
-                        if current_price < 1000: continue
+                        if current_price < 2000: continue
                         
                         available_cash = portfolio.get_cash()
                         
                         # 동적 파라미터에서 자본 배분 가중치 가져오기 (기본값 1.0)
                         allocation_weight = self.dynamic_params.get('capital_allocation_weight', 1.0)
                         
-                        # 전체 현금의 90%를 최대 포지션 수로 나눈 금액에 가중치 적용
-                        # [전수조사 수정] 시장가 주문 슬리피지 5% 버퍼 적용 (90% 사용)
-                        buy_amount = (available_cash * 0.90 * allocation_weight) / params['max_positions']
+                        # 전체 현금의 93%를 최대 포지션 수로 나눈 금액에 가중치 적용
+                        # [최적화] 시장가 주문 슬리피지 7% 버퍼 적용 (93% 사용)
+                        buy_amount = (available_cash * 0.93 * allocation_weight) / params['max_positions']
                         quantity = int(buy_amount // current_price)
 
                         if quantity == 0: continue
