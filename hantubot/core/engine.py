@@ -416,8 +416,8 @@ class TradingEngine:
                     post_market_run_today = False
                     logger.debug("장이 열려있습니다. 전략 실행 준비 중.")
                     
-                    # 09:00 장 시작 시 모든 포지션 청산 (최우선 처리)
-                    if now.hour == 9 and now.minute == 0:
+                    # 09:01 장 시작 시 모든 포지션 청산 (최우선 처리)
+                    if now.hour == 9 and now.minute == 1:
                         await self._process_market_open_logic()
                         # 청산 후 3초 대기 (체결 처리 시간)
                         await asyncio.sleep(3)

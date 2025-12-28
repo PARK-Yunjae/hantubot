@@ -40,8 +40,8 @@ trading_hours:
 
 # 트레이딩 루프 설정
 # 메인 트레이딩 루프가 한 번의 사이클을 도는 주기 (초 단위)
-# 예: 60 -> 1분마다 시장을 확인하고 전략을 실행합니다.
-trading_loop_interval_seconds: 60
+# 30초: 강제 청산 정확도 향상 + 급등/급락 빠른 대응
+trading_loop_interval_seconds: 30
 
 # ------------------------------------------------------------------------------
 
@@ -108,6 +108,8 @@ strategy_settings:
     supported_modes: ['mock', 'live']
 
   opening_breakout_strategy:
+    # 1종목 고수 (복리 전략)
+    max_positions: 1
     # 지원하는 실행 모드. 모의투자 시에는 네이버 금융 데이터로 대체하여 실행.
     supported_modes: ['mock', 'live']
 
