@@ -15,7 +15,7 @@ from .logger import get_logger
 from .study_db import get_study_db, StudyDatabase
 from ..utils.stock_filters import is_eligible_stock
 from ..providers import NaverNewsProvider
-from ..utils.config_loader import load_config
+from ..utils.config_loader import load_config_with_env
 
 logger = get_logger(__name__)
 
@@ -32,7 +32,7 @@ def backup_database():
         from datetime import datetime
         import shutil
         
-        config = load_config()
+        config = load_config_with_env('configs/config.yaml')
         study_config = config.get('study', {})
         
         # 백업 활성화 체크
