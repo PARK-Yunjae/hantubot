@@ -125,32 +125,74 @@ class OrderManager:
                     logger.error(f"[OrderManager] Not enough position for SELL {symbol}. Required: {quantity}, Held: {self._portfolio.get_position_quantity(symbol)}")
                     return
             
-            # 4. 브로커를 통해 주문 실행 요청
-            try:
-                order_result = self._broker.place_order(
-                    symbol=symbol,
-                    side=side,
-                    quantity=quantity,
-                    price=price,
-                    order_type=order_type
-                )
-                
-                if order_result and order_result.get('order_id'):
-                    # 5. 성공 시 포트폴리오 상태 업데이트 및 멱등성 키 기록
-                    # 주문 정보에 전략 ID를 추가하여 포트폴리오에 전달
-                    order_to_log = {**order_result, 'strategy_id': strategy_id}
-                    self._portfolio.update_on_new_order(order_to_log)
+            # 4. 브로커를 통해 주문 실행 요청 (매도는 3회 재시도)
+            max_retries = 3 if side == 'sell' else 1
+            order_result = None
+            
+            for attempt in range(max_retries):
+                try:
+                    if attempt > 0:
+                        logger.warning(f"[OrderManager] 매도 주문 재시도 {attempt+1}/{max_retries}: {symbol}")
+                        import time
+                        time.sleep(0.5)  # 0.5초 대기 후 재시도
                     
-                    self._idempotency_keys[(strategy_id, symbol, side)] = (order_result['order_id'], datetime.now())
-                    logger.info(f"주문 접수 성공: {order_result}")
+                    order_result = self._broker.place_order(
+                        symbol=symbol,
+                        side=side,
+                        quantity=quantity,
+                        price=price,
+                        order_type=order_type
+                    )
                     
-                    # 6. 주문 데이터를 JSONL 파일에 로깅
-                    trades_logger.info({'event_type': 'NEW_ORDER', **order_to_log})
-                else:
-                    logger.error(f"주문 접수 실패: {order_result}")
+                    if order_result and order_result.get('order_id'):
+                        # 5. 성공 시 포트폴리오 상태 업데이트 및 멱등성 키 기록
+                        # 주문 정보에 전략 ID를 추가하여 포트폴리오에 전달
+                        order_to_log = {**order_result, 'strategy_id': strategy_id}
+                        self._portfolio.update_on_new_order(order_to_log)
+                        
+                        self._idempotency_keys[(strategy_id, symbol, side)] = (order_result['order_id'], datetime.now())
+                        logger.info(f"주문 접수 성공: {order_result}")
+                        
+                        # 6. 주문 데이터를 JSONL 파일에 로깅
+                        trades_logger.info({'event_type': 'NEW_ORDER', **order_to_log})
+                        break  # 성공하면 루프 탈출
+                    else:
+                        logger.error(f"주문 접수 실패 (시도 {attempt+1}/{max_retries}): {order_result}")
+                        if attempt == max_retries - 1:
+                            # 최종 실패 시 긴급 알림 (매도만)
+                            if side == 'sell':
+                                from ..reporting.notifier import Notifier
+                                notifier = Notifier()
+                                notifier.send_alert(
+                                    f"🚨 긴급: {symbol} 매도 주문 {max_retries}회 실패!",
+                                    embed={
+                                        "title": "매도 주문 최종 실패",
+                                        "description": f"종목: {symbol}\n수량: {quantity}주\n시도: {max_retries}회",
+                                        "color": 15158332,  # 빨간색
+                                        "fields": [
+                                            {"name": "전략", "value": strategy_id, "inline": True},
+                                            {"name": "주문 타입", "value": order_type, "inline": True}
+                                        ]
+                                    },
+                                    level='critical'
+                                )
 
-            except Exception as e:
-                logger.critical(f"[OrderManager] Exception during order placement for {symbol}: {e}", exc_info=True)
+                except Exception as e:
+                    logger.critical(f"[OrderManager] Exception during order placement for {symbol} (시도 {attempt+1}/{max_retries}): {e}", exc_info=True)
+                    if attempt == max_retries - 1:
+                        # 최종 실패 시 긴급 알림 (매도만)
+                        if side == 'sell':
+                            from ..reporting.notifier import Notifier
+                            notifier = Notifier()
+                            notifier.send_alert(
+                                f"🚨 긴급: {symbol} 매도 주문 예외 발생!",
+                                embed={
+                                    "title": "매도 주문 예외",
+                                    "description": f"종목: {symbol}\n오류: {str(e)}",
+                                    "color": 15158332
+                                },
+                                level='critical'
+                            )
 
     def handle_fill_update(self, fill_details: dict):
         """

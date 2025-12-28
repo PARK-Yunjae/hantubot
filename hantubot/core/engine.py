@@ -113,7 +113,8 @@ class TradingEngine:
                     await asyncio.sleep(15)
                     continue
                 
-                concluded_orders = self.broker.get_concluded_orders()
+                loop = asyncio.get_running_loop()
+                concluded_orders = await loop.run_in_executor(None, self.broker.get_concluded_orders)
                 
                 for fill in concluded_orders:
                     execution_id = fill.get('execution_id')
