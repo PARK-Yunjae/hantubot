@@ -150,6 +150,32 @@ strategy_settings:
 
 # ------------------------------------------------------------------------------
 
+# 유목민 공부법 설정
+study:
+  # 저장 모드: sqlite (SQLite DB), gsheet (Google Sheets), both (둘 다)
+  mode: 'sqlite'
+  # 학습 메모 생성 활성화
+  enable_study_notes: true
+  # Git 자동 커밋 활성화
+  enable_auto_commit: true
+  # LLM 배치 크기 (한 번에 처리할 종목 수)
+  llm_batch_size: 5
+  # Gemini 모델 선택
+  gemini_model: 'gemini-2.0-flash-exp'
+  # DB 자동 백업 활성화 (일요일마다)
+  enable_auto_backup: true
+  # 백업 보관 기간 (일)
+  backup_retention_days: 30
+
+# 뉴스 수집 설정
+news:
+  # 종목당 최대 뉴스 수집 개수
+  max_items_per_ticker: 20
+  # Rate limit 대기 시간 (초)
+  rate_limit_delay: 0.3
+
+# ------------------------------------------------------------------------------
+
 # 리스크 관리 설정 (실전 투자 전용 안전 장치)
 risk_management:
   # 1회 주문 최대 금액 (원). 이 금액을 초과하는 주문은 거부됩니다.

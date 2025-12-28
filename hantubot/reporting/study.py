@@ -15,8 +15,69 @@ from .logger import get_logger
 from .study_db import get_study_db, StudyDatabase
 from ..utils.stock_filters import is_eligible_stock
 from ..providers import NaverNewsProvider
+from ..utils.config_loader import load_config
 
 logger = get_logger(__name__)
+
+
+def backup_database():
+    """
+    study.db 자동 백업 (config.yaml 설정 기반)
+    
+    - 일요일마다 자동 백업
+    - 설정된 기간(기본 30일) 이상 된 백업 자동 삭제
+    """
+    try:
+        from pathlib import Path
+        from datetime import datetime
+        import shutil
+        
+        config = load_config()
+        study_config = config.get('study', {})
+        
+        # 백업 활성화 체크
+        if not study_config.get('enable_auto_backup', True):
+            logger.debug("DB 자동 백업이 비활성화되어 있습니다.")
+            return
+        
+        db_path = Path('data/study.db')
+        if not db_path.exists():
+            logger.warning("study.db 파일이 없어 백업을 건너뜁니다.")
+            return
+        
+        backup_dir = Path('data/backups')
+        backup_dir.mkdir(exist_ok=True)
+        
+        # 일요일(weekday=6)마다 백업
+        now = datetime.now()
+        if now.weekday() == 6:
+            backup_file = backup_dir / f"study_backup_{now:%Y%m%d}.db"
+            
+            # 이미 오늘 백업이 있으면 건너뜀
+            if backup_file.exists():
+                logger.info(f"오늘 백업이 이미 존재합니다: {backup_file}")
+                return
+            
+            shutil.copy(db_path, backup_file)
+            logger.info(f"✅ DB 백업 완료: {backup_file}")
+            
+            # 오래된 백업 삭제
+            retention_days = study_config.get('backup_retention_days', 30)
+            deleted_count = 0
+            for old_backup in backup_dir.glob("study_backup_*.db"):
+                age_days = (now - datetime.fromtimestamp(old_backup.stat().st_mtime)).days
+                if age_days > retention_days:
+                    old_backup.unlink()
+                    deleted_count += 1
+                    logger.info(f"오래된 백업 삭제: {old_backup} ({age_days}일)")
+            
+            if deleted_count > 0:
+                logger.info(f"총 {deleted_count}개의 오래된 백업 삭제 완료")
+        else:
+            logger.debug(f"백업 예정일이 아닙니다. (현재: {now.strftime('%A')}, 백업일: 일요일)")
+    
+    except Exception as e:
+        logger.error(f"DB 백업 중 오류 발생: {e}", exc_info=True)
 
 
 def get_latest_trading_date() -> str:
@@ -163,6 +224,13 @@ def run_daily_study(broker, notifier, force_run=False, target_date=None):
         
         # 완료 알림
         send_completion_notification(today_str, stats, notifier, db)
+        
+        # ========== DB 자동 백업 (옵션) ==========
+        try:
+            logger.info("[추가] DB 자동 백업 체크 중...")
+            backup_database()
+        except Exception as e:
+            logger.warning(f"DB 자동 백업 중 오류 (무시됨): {e}")
         
         # ========== GitHub 자동 커밋 (옵션) ==========
         enable_auto_commit = os.getenv('ENABLE_GIT_AUTO_COMMIT', 'true').lower() == 'true'
@@ -798,6 +866,12 @@ def auto_commit_to_github(run_date: str, stats: Dict):
     try:
         # Git 저장소 루트 경로
         repo_root = Path(__file__).parent.parent.parent
+        
+        # Git lock 파일 체크 (동시 Git 작업 방지)
+        lock_file = repo_root / '.git' / 'index.lock'
+        if lock_file.exists():
+            logger.warning("Git lock 파일 감지됨. 다른 Git 작업이 진행 중입니다. 커밋을 건너뜁니다.")
+            return
         
         # data/study.db 파일이 있는지 확인
         db_file = repo_root / 'data' / 'study.db'
