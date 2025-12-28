@@ -31,9 +31,41 @@ def translate_status(status):
         'news_failed': '뉴스 수집 실패',
         'summarized': 'AI 요약 완료',
         'summary_failed': 'AI 요약 실패',
-        'completed': '완료'
+        'completed': '완료',
+        'success': '완료',
+        'partial': '부분 완료',
+        'fail': '실패'
     }
     return mapping.get(status, status)
+
+
+def format_datetime_korean(date_string):
+    """날짜 문자열을 한글 형식으로 변환"""
+    if not date_string or date_string == '-':
+        return '-'
+    
+    try:
+        # 다양한 날짜 형식 처리
+        if len(date_string) == 8:  # YYYYMMDD
+            year, month, day = date_string[:4], date_string[4:6], date_string[6:8]
+            return f"{int(month)}월 {int(day)}일"
+        elif 'T' in date_string or ' ' in date_string:  # ISO format or datetime
+            # datetime 파싱
+            dt = datetime.fromisoformat(date_string.replace('T', ' ').replace('Z', ''))
+            return f"{dt.month}월 {dt.day}일 {dt.hour:02d}:{dt.minute:02d}"
+        elif '-' in date_string:  # YYYY-MM-DD format
+            parts = date_string.split(' ')
+            date_part = parts[0]
+            year, month, day = date_part.split('-')
+            if len(parts) > 1:  # Has time
+                time_part = parts[1].split(':')
+                return f"{int(month)}월 {int(day)}일 {time_part[0]}:{time_part[1]}"
+            else:
+                return f"{int(month)}월 {int(day)}일"
+        else:
+            return date_string
+    except Exception as e:
+        return date_string
 
 # 페이지 설정
 st.set_page_config(
@@ -233,7 +265,7 @@ if filtered_candidates:
             st.metric("종가", f"{selected_candidate['close_price']:,}원")
             st.metric("등락률", f"{selected_candidate['change_pct']:.2f}%")
             st.metric("거래량", f"{selected_candidate['volume']:,}주")
-            st.metric("선정 사유", selected_candidate['reason_flag'])
+            st.metric("선정 사유", translate_reason_flag(selected_candidate['reason_flag']))
         
         with col_detail2:
             # AI 요약
@@ -242,7 +274,8 @@ if filtered_candidates:
             
             if summary:
                 st.info(summary['summary_text'])
-                st.caption(f"모델: {summary.get('llm_model', 'unknown')} | 생성일: {summary.get('created_at', '-')}")
+                created_at_korean = format_datetime_korean(summary.get('created_at', '-'))
+                st.caption(f"모델: {summary.get('llm_model', 'unknown')} | 생성일: {created_at_korean}")
             else:
                 st.warning("AI 요약이 생성되지 않았습니다.")
             
@@ -254,7 +287,8 @@ if filtered_candidates:
                 for i, news in enumerate(news_items, 1):
                     with st.expander(f"[{i}] {news['title']}"):
                         st.markdown(f"**발행처:** {news.get('publisher', '알 수 없음')}")
-                        st.markdown(f"**발행 시간:** {news.get('published_at', '알 수 없음')}")
+                        published_at_korean = format_datetime_korean(news.get('published_at', '알 수 없음'))
+                        st.markdown(f"**발행 시간:** {published_at_korean}")
                         st.markdown(f"**요약:** {news.get('snippet', '내용 없음')}")
                         st.markdown(f"[🔗 기사 보기]({news['url']})")
             else:
