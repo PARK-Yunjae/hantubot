@@ -68,8 +68,8 @@ class NaverNewsProvider(NewsProvider):
                         seen_urls.add(url)
                         news_items.append(item)
                 
-                # Rate limiting (네이버 API 권장)
-                time.sleep(0.1)
+                # Rate limiting (네이버 API 권장) - 충분한 대기 시간 확보
+                time.sleep(0.5)
                 
                 # 충분한 뉴스를 수집했으면 중단
                 if len(news_items) >= self.max_items_per_ticker:
@@ -91,7 +91,7 @@ class NaverNewsProvider(NewsProvider):
     
     def _search_news_api(self, keyword: str, display: int = 10) -> List[Dict]:
         """
-        Naver 검색 API 호출 (공식)
+        Naver 검색 API 호출 (공식) - 재시도 로직 포함
         
         Args:
             keyword: 검색 키워드
@@ -101,68 +101,83 @@ class NaverNewsProvider(NewsProvider):
             뉴스 아이템 리스트
         """
         news_items = []
+        max_retries = 3
         
-        try:
-            # API 요청 헤더
-            headers = {
-                "X-Naver-Client-Id": self.client_id,
-                "X-Naver-Client-Secret": self.client_secret
-            }
-            
-            # API 요청 파라미터
-            params = {
-                "query": keyword,
-                "display": min(display, 100),  # 최대 100개
-                "sort": "date"  # 최신순 (또는 "sim" - 정확도순)
-            }
-            
-            # API 호출
-            response = requests.get(
-                self.api_url,
-                headers=headers,
-                params=params,
-                timeout=10
-            )
-            
-            # 상태 코드 확인
-            if response.status_code == 200:
-                data = response.json()
-                items = data.get('items', [])
+        for attempt in range(max_retries):
+            try:
+                # API 요청 헤더
+                headers = {
+                    "X-Naver-Client-Id": self.client_id,
+                    "X-Naver-Client-Secret": self.client_secret
+                }
                 
-                # 데이터 변환 (API 응답 → 내부 형식)
-                for item in items:
-                    try:
-                        # HTML 태그 제거 (<b>, </b> 등)
-                        title = self._clean_html(item.get('title', ''))
-                        description = self._clean_html(item.get('description', ''))
-                        
-                        # 뉴스 아이템 구성
-                        news_item = {
-                            'title': title,
-                            'url': item.get('link', ''),
-                            'publisher': item.get('originallink', '').split('/')[2] if item.get('originallink') else 'Naver',
-                            'published_at': self._format_date_korean(item.get('pubDate', '')),
-                            'snippet': description
-                        }
-                        
-                        # 유효성 검사 + 저품질 필터링
-                        if self._validate_news_item(news_item) and self._is_quality_news(news_item):
-                            news_items.append(news_item)
+                # API 요청 파라미터
+                params = {
+                    "query": keyword,
+                    "display": min(display, 100),  # 최대 100개
+                    "sort": "date"  # 최신순 (또는 "sim" - 정확도순)
+                }
+                
+                # API 호출
+                response = requests.get(
+                    self.api_url,
+                    headers=headers,
+                    params=params,
+                    timeout=10
+                )
+                
+                # 상태 코드 확인
+                if response.status_code == 200:
+                    data = response.json()
+                    items = data.get('items', [])
                     
-                    except Exception as e:
-                        # 개별 뉴스 파싱 실패는 무시
-                        print(f"뉴스 파싱 실패: {e}")
+                    # 데이터 변환 (API 응답 → 내부 형식)
+                    for item in items:
+                        try:
+                            # HTML 태그 제거 (<b>, </b> 등)
+                            title = self._clean_html(item.get('title', ''))
+                            description = self._clean_html(item.get('description', ''))
+                            
+                            # 뉴스 아이템 구성
+                            news_item = {
+                                'title': title,
+                                'url': item.get('link', ''),
+                                'publisher': item.get('originallink', '').split('/')[2] if item.get('originallink') else 'Naver',
+                                'published_at': self._format_date_korean(item.get('pubDate', '')),
+                                'snippet': description
+                            }
+                            
+                            # 유효성 검사 + 저품질 필터링
+                            if self._validate_news_item(news_item) and self._is_quality_news(news_item):
+                                news_items.append(news_item)
+                        
+                        except Exception as e:
+                            # 개별 뉴스 파싱 실패는 무시
+                            # print(f"뉴스 파싱 실패: {e}") # 너무 시끄러워서 주석 처리
+                            continue
+                    
+                    # 성공하면 루프 탈출
+                    break
+                
+                elif response.status_code == 429:
+                    # Rate Limit 걸리면 대기 후 재시도
+                    wait_time = 2.0 * (attempt + 1)
+                    if attempt < max_retries - 1:
+                        # print(f"⚠️ API 호출 제한 (429) - {wait_time}초 대기 후 재시도 ({attempt+1}/{max_retries})")
+                        time.sleep(wait_time)
                         continue
+                    else:
+                        print(f"⚠️ API 호출 제한 초과 (429) - 최대 재시도 횟수 도달. 건너뜀.")
+                else:
+                    print(f"⚠️ API 호출 실패 ({response.status_code}): {response.text}")
+                    break
             
-            elif response.status_code == 429:
-                print(f"⚠️ API 호출 제한 초과 (429) - 잠시 대기 필요")
-            else:
-                print(f"⚠️ API 호출 실패 ({response.status_code}): {response.text}")
-        
-        except requests.exceptions.Timeout:
-            print(f"⏱️ API 호출 타임아웃: {keyword}")
-        except Exception as e:
-            print(f"❌ Naver API 검색 실패 '{keyword}': {e}")
+            except requests.exceptions.Timeout:
+                print(f"⏱️ API 호출 타임아웃: {keyword}")
+                break
+            except Exception as e:
+                print(f"❌ Naver API 검색 실패 '{keyword}': {e}")
+                break
         
         return news_items
     
@@ -180,7 +195,7 @@ class NaverNewsProvider(NewsProvider):
         text = text.replace('<b>', '').replace('</b>', '')
         text = text.replace('<strong>', '').replace('</strong>', '')
         
-        # HTML 엔티티 디코딩 (&quot; → ", &amp; → & 등)
+        # HTML 엔티티 디코딩 (" → ", & → & 등)
         text = html.unescape(text)
         
         return text.strip()

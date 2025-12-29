@@ -45,6 +45,10 @@ class TradingEngine:
         # 레짐 관리자는 이제 외부에서 주입됩니다.
         self.regime_manager = regime_manager
         
+        # [Report] 정기 생존 신고(Heartbeat) 발송 여부 플래그
+        self._sent_0930_report = False
+        self._sent_1500_report = False
+        
         self._load_strategies()
         self._running = False
         logger.info("트레이딩 엔진 초기화 완료.")
@@ -213,9 +217,12 @@ class TradingEngine:
         """전략에 필요한 모든 데이터를 준비하고 캐싱합니다."""
         today = dt.date.today()
         if self.cache_date != today:
-            logger.info(f"새로운 거래일({today})입니다. 일봉 데이터 캐시를 초기화합니다.")
+            logger.info(f"새로운 거래일({today})입니다. 일봉 데이터 캐시 및 리포트 플래그를 초기화합니다.")
             self.daily_data_cache.clear()
             self.cache_date = today
+            # 리포트 플래그 초기화
+            self._sent_0930_report = False
+            self._sent_1500_report = False
 
         all_symbols = set()
         for strategy in self.active_strategies:
@@ -270,6 +277,52 @@ class TradingEngine:
         else:
             logger.info("시초가에 청산할 포지션이 없습니다.")
     
+    async def _check_time_based_reports(self):
+        """특정 시간대(09:30, 15:00)에 생존 신고 및 전략 종료 알림을 보냅니다."""
+        now = dt.datetime.now()
+        
+        # 1. 09:30 알림 (오전 전략 종료)
+        if not self._sent_0930_report and (now.hour > 9 or (now.hour == 9 and now.minute >= 30)):
+            msg = "🔔 [09:30] 오전장 전략(Opening Breakout) 종료. 봇 생존 확인 완료."
+            logger.info(msg)
+            
+            # 포지션 상태 요약
+            positions = self.portfolio.get_positions()
+            pos_desc = "보유 포지션 없음"
+            if positions:
+                pos_desc = "\n".join([f"- {p['symbol']}: {p['quantity']}주" for p in positions.values()])
+            
+            embed = {
+                "title": "✅ 09:30 오전장 점검",
+                "description": "오전 단타 전략이 종료되었습니다. 봇은 정상 작동 중입니다.",
+                "color": 3066993, # Green
+                "fields": [
+                    {"name": "현재 상태", "value": "정상 (Running)", "inline": True},
+                    {"name": "보유 포지션", "value": pos_desc, "inline": False}
+                ],
+                "footer": {"text": f"Report time: {now.strftime('%H:%M:%S')}"}
+            }
+            self.notifier.send_alert(msg, embed=embed, level='info')
+            self._sent_0930_report = True
+
+        # 2. 15:00 알림 (오후 전략 종료 및 종가매매 준비)
+        if not self._sent_1500_report and now.hour >= 15:
+            msg = "🔔 [15:00] 오후장 전략(Volume Spike) 종료. 종가매매(Closing Price) 준비 단계 진입."
+            logger.info(msg)
+            
+            embed = {
+                "title": "✅ 15:00 오후장 점검",
+                "description": "오후 단타 전략 종료. 종가 배팅(Closing Price) 전략을 준비합니다.",
+                "color": 3447003, # Blue
+                "fields": [
+                    {"name": "현재 상태", "value": "종가매매 진입 대기", "inline": True},
+                    {"name": "남은 시간", "value": "장 마감까지 30분", "inline": True}
+                ],
+                "footer": {"text": f"Report time: {now.strftime('%H:%M:%S')}"}
+            }
+            self.notifier.send_alert(msg, embed=embed, level='info')
+            self._sent_1500_report = True
+
     async def _check_forced_liquidation(self):
         """
         전략별 시간대 강제 청산 로직 (우선 처리)
@@ -278,6 +331,9 @@ class TradingEngine:
         """
         now = dt.datetime.now()
         positions = self.portfolio.get_positions()
+        
+        # [Report] 시간대별 리포트 체크
+        await self._check_time_based_reports()
         
         if not positions:
             return False  # 청산할 것이 없음
@@ -478,8 +534,19 @@ class TradingEngine:
             # 장 외 시간이거나, 비거래일이거나, 장 마감 후 로직을 이미 실행한 경우
             logger.debug("장외 시간이거나 비거래일입니다. 장시간 대기 준비 중.")
             next_trading_day = now.date()
-            if now.time() >= wake_up_time:
+            
+            # [Hotfix] 스케줄링 로직 개선: 장 중(08:50 ~ 15:30)에 켜졌다면 내일로 넘기지 않음
+            market_times = self.market_clock.get_market_times()
+            market_close_time = market_times.get('close', dt.time(15, 30))
+            
+            # 현재 시간이 기상 시간(08:50) 이후이고, 장 마감(15:30) 이전이라면 "오늘" 매매해야 함
+            # 따라서 "장 마감 시간이 지났을 때만" 내일로 넘김
+            if now.time() >= market_close_time:
                 next_trading_day += dt.timedelta(days=1)
+            elif now.time() >= wake_up_time and not is_trading_day:
+                 # 비거래일인데 기상 시간이 지났으면 내일로 (휴일 09:00에 켠 경우 등)
+                next_trading_day += dt.timedelta(days=1)
+            # 거래일이고 장 마감 전이면 next_trading_day는 오늘 날짜 그대로 유지 -> 즉시 루프 재진입 시도
 
             while not self.market_clock.is_trading_day(next_trading_day):
                 next_trading_day += dt.timedelta(days=1)
