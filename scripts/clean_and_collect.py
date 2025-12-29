@@ -3,11 +3,16 @@
 잘못된 데이터 정리 및 재수집
 """
 import sqlite3
-from pathlib import Path
+import os
+import sys
+
+# 프로젝트 루트 경로 추가
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(BASE_DIR)
 
 # DB 연결
-db_path = Path('data/study.db')
-conn = sqlite3.connect(db_path)
+DB_PATH = os.path.join(BASE_DIR, 'data', 'study.db')
+conn = sqlite3.connect(DB_PATH)
 cursor = conn.cursor()
 
 print("=" * 60)

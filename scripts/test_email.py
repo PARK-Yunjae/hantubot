@@ -4,11 +4,18 @@
 이메일 알림 테스트 스크립트
 """
 import os
+import sys
+
+# 프로젝트 루트 경로 추가 (모듈 import 위해)
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(BASE_DIR)
+
 from dotenv import load_dotenv
 from hantubot.utils.email_alert import send_critical_alert
 
-# .env 파일 로드 (중요!)
-load_dotenv('configs/.env')
+# .env 파일 로드
+ENV_PATH = os.path.join(BASE_DIR, 'configs', '.env')
+load_dotenv(ENV_PATH)
 
 print("=" * 60)
 print("📧 이메일 테스트 시작...")

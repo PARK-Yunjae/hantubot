@@ -2,7 +2,7 @@
 
 > **프로덕션급 알고리즘 트레이딩 시스템 | 한국투자증권 API 기반**
 
-[![Python](https://img.shields.io/badge/Python-3.12+-blue.svg)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/Status-Production-success.svg)](https://github.com)
 
@@ -12,14 +12,9 @@
 
 1. [프로젝트 소개](#-프로젝트-소개)
 2. [주요 기능](#-주요-기능)
-3. [시스템 아키텍처](#-시스템-아키텍처)
-4. [설치 방법](#-설치-방법)
-5. [설정 가이드](#-설정-가이드)
-6. [실행 방법](#-실행-방법)
-7. [전략 시스템](#-전략-시스템)
-8. [FAQ](#-faq)
-9. [문제 해결](#-문제-해결)
-10. [면책 조항](#-면책-조항)
+3. [설치 및 실행](#-설치-및-실행)
+4. [문서 가이드](#-문서-가이드)
+5. [면책 조항](#-면책-조항)
 
 ---
 
@@ -33,606 +28,70 @@ Hantubot은 한국투자증권 API를 활용한 **완전 자동화된 알고리�
 - ⏰ **시간대별 전략 관리**: 09:00 시초가 청산, 전략별 자동 청산
 - 📊 **레짐 기반 매매**: 시장 상황(상승/중립/하락)에 따른 동적 파라미터 조정
 - 📱 **Discord 실시간 알림**: 매수/매도 체결, 잔고, 손익률 상세 알림
-- 📚 **유목민 공부법**: Google Sheets + Gemini AI로 자동 종목 분석
+- 📚 **유목민 공부법**: 장 마감 후 자동 데이터 수집 및 AI 분석
 - 🎨 **GUI 컨트롤러**: PySide6 기반 직관적인 인터페이스
-- 🔄 **모의/실전 전환**: 설정 파일 변경만으로 즉시 전환
 
 ---
 
 ## 🚀 주요 기능
 
 ### 1. 지능형 시간 관리
-
-```
-08:50 ─→ 시스템 기상
-09:00 ─→ 전날 보유 종목 시초가 청산 (최우선)
-09:00-09:30 ─→ Opening Breakout 전략 (갭 상승 + 거래량)
-09:29 ─→ Opening Breakout 강제 청산 시작 (1분 여유)
-09:30-14:50 ─→ Volume Spike 전략 (거래량 순위 급상승)
-14:59 ─→ Volume Spike 강제 청산 시작 (1분 여유)
-15:03 ─→ Closing Price 전략 (종가 매매)
-15:20-15:30 ─→ 동시호가 (체결 조회 중지)
-15:30 ─→ 장 마감 후 처리
-    ├─ 일일 리포트 생성
-    ├─ 유목민 공부법 (Google Sheets)
-    └─ 전략 최적화 분석
-```
+- **09:00**: 시초가 청산 (최우선)
+- **09:00-09:30**: Opening Breakout 전략 (갭 상승 + 거래량)
+- **09:30-14:50**: Volume Spike 전략 (거래량 급증 추격)
+- **15:03**: Closing Price 전략 (종가 매매)
+- **15:30**: 장 마감 후 데이터 수집 및 리포팅
 
 ### 2. 레짐 기반 동적 매매
+시장 상황(상승/중립/하락)에 따라 익절/손절 폭과 매수 조건을 자동으로 조절합니다.
 
-시장 상황에 따라 자동으로 매매 파라미터 조정:
-
-| 레짐 | 익절 | 손절 | 매수 조건 | 포지션 |
-|------|------|------|----------|--------|
-| 🟢 상승장 | +3% | -2% | 공격적 | 최대 1종목 |
-| 🟡 중립장 | +2% | -2% | 표준 | 최대 1종목 |
-| 🔴 하락장 | +1.5% | -1.5% | 보수적 | 거래 중지 |
-
-### 3. Discord 상세 알림
-
-**매수 체결 알림:**
-```
-💰 ✅ 매수 체결: 삼성전자 (005930)
-
-▫️ 체결 수량: 10주
-▫️ 체결 가격: 75,000원
-▫️ 체결 금액: 750,000원
-▫️ 현금 잔고: 19,250,000원
-
-체결 시간: 2025-12-24 09:05:30
-```
-
-**매도 체결 알림 (보유 잔고 포함):**
-```
-💵 ✅ 매도 체결: 삼성전자 (005930)
-
-▫️ 체결 수량: 10주
-▫️ 체결 가격: 77,000원
-▫️ 체결 금액: 770,000원
-▫️ 수익률: +2.67%
-▫️ 현재 보유 종목: 없음 (전부 청산)
-▫️ 현금 잔고: 20,020,000원
-
-체결 시간: 2025-12-24 09:30:15
-```
-
-### 4. 유목민 공부법 (자동 학습 시스템)
-
-매일 장 마감 후 자동으로:
-1. 거래량 천만주 이상 종목 필터링
-2. 상한가 근처 종목 선정
-3. **Gemini AI**로 기업 개요 자동 생성
-4. **Google Sheets**에 자동 기록
-5. 등장 빈도 분석
-
-**결과:** 100일간 패턴 학습 → 투자 아이디어 도출
+### 3. 유목민 공부법 (자동 학습)
+매일 장 마감 후 상한가 및 대량 거래 종목을 수집하고, **Gemini AI**가 상승 이유를 요약해줍니다.
 
 ---
 
-## 🏗️ 시스템 아키텍처
+## 💻 설치 및 실행
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                      GUI Controller                       │
-│                    (main_window.py)                       │
-└──────────────────────────┬──────────────────────────────┘
-                           │
-┌──────────────────────────▼──────────────────────────────┐
-│                    Trading Engine                         │
-│                      (engine.py)                          │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  Market Clock → 시간 체크 및 강제 청산          │    │
-│  │  Regime Manager → 시장 레짐 판단                │    │
-│  │  Strategy Manager → 전략 실행                   │    │
-│  └─────────────────────────────────────────────────┘    │
-└──────────────────────────┬──────────────────────────────┘
-                           │
-         ┌─────────────────┼─────────────────┐
-         │                 │                 │
-┌────────▼────────┐ ┌─────▼──────┐ ┌───────▼────────┐
-│ Order Manager   │ │ Portfolio  │ │   Strategies   │
-│ (주문 검증)      │ │ (자산관리)  │ │   (전략 3개)   │
-└────────┬────────┘ └────────────┘ └────────────────┘
-         │
-┌────────▼────────┐
-│     Broker      │
-│  (KIS API 통신) │
-└─────────────────┘
-         │
-┌────────▼────────┐
-│ 한국투자증권 API │
-└─────────────────┘
-```
-
----
-
-## 💻 설치 방법
-
-### ⭐ 권장: venv로 설치 (가볍고 빠름!)
-
-아나콘다 없이도 Python 기본 가상환경만으로 충분합니다! 더 가볍고 배포도 쉽습니다.
-
-#### Step 1: Python 설치 (3.11 이상)
-
-**Windows:**
-1. [Python 공식 사이트](https://www.python.org/downloads/) 접속
-2. "Download Python 3.11" 클릭
-3. 설치 시 **"Add Python to PATH"** 체크 ✅ (중요!)
-4. Install Now 클릭
-
-**확인:**
-```bash
-python --version
-# Python 3.11.x 또는 3.12.x 출력되면 성공
-```
-
-#### Step 2: 프로젝트 클론
-
+### 1. 설치
 ```bash
 git clone https://github.com/PARK-Yunjae/hantubot.git
-cd hantubot_prod
-```
-
-#### Step 3: 가상환경 생성 및 활성화
-
-```bash
-# Windows (CMD 또는 PowerShell)
 python -m venv venv
 venv\Scripts\activate
-
-# macOS/Linux
-python3 -m venv venv
-source venv/bin/activate
-```
-
-**가상환경 활성화 확인:**
-```bash
-# 프롬프트 앞에 (venv) 표시되면 성공!
-(venv) C:\Coding\hantubot_prod>
-```
-
-#### Step 4: 패키지 설치
-
-```bash
-pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-**설치 확인:**
-```bash
-pip list
-# PySide6, pandas, requests 등이 보이면 성공
-```
+### 2. 설정
+`configs/.env.example`을 복사하여 `.env`를 만들고 API 키를 입력하세요.
 
----
-
-## ⚙️ 설정 가이드
-
-### 1. 한국투자증권 API 발급
-
-1. [한국투자증권 홈페이지](https://www.koreainvestment.com) 접속
-2. 로그인 → [KIS Developers](https://apiportal.koreainvestment.com) 이동
-3. **모의투자** 또는 **실전투자** 선택
-4. `APP_KEY`, `APP_SECRET` 발급
-5. 계좌번호 확인 (형식: `12345678-01`)
-
-### 2. Discord 웹훅 생성 (선택사항)
-
-1. Discord 서버 설정 → 연동 → 웹훅
-2. "새 웹훅" 클릭
-3. 이름 설정 (예: Hantubot)
-4. 웹훅 URL 복사
-
-### 3. `.env` 파일 생성
-
-```bash
-# configs/.env.example 복사
-cp configs/.env.example configs/.env
-
-# Windows
-copy configs\.env.example configs\.env
-```
-
-**configs/.env 편집:**
-```env
-# 한국투자증권 API 키
-KIS_APP_KEY="발급받은_APP_KEY"
-KIS_APP_SECRET="발급받은_APP_SECRET"
-KIS_ACCOUNT_NO="12345678-01"
-
-# Discord 알림 (선택)
-DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..."
-
-# Gemini API (유목민 공부법용, 선택)
-GEMINI_API_KEY="발급받은_Gemini_API_키"
-```
-
-### 4. `config.yaml` 설정
-
-**configs/config.yaml:**
-```yaml
-# 거래 모드
-mode: mock  # 'mock' (모의) 또는 'live' (실전)
-
-# 활성 전략
-active_strategies:
-  - opening_breakout_strategy      # 09:00-09:30
-  - volume_spike_strategy           # 09:30-14:50
-  - closing_price_advanced_screener # 15:03
-
-# 전략별 설정
-strategy_settings:
-  closing_price_advanced_screener:
-    enabled: true
-    cci_period: 14
-    cci_target: 180
-    score_threshold: 80
-  
-  opening_breakout_strategy:
-    enabled: true
-  
-  volume_spike_strategy:
-    enabled: true
-    params_by_regime:
-      RISK_ON:
-        take_profit_pct: 3.0
-        stop_loss_pct: -2.0
-      NEUTRAL:
-        take_profit_pct: 2.0
-        stop_loss_pct: -2.0
-      RISK_OFF:
-        trade_enabled: false
-```
-
----
-
-## 🎮 실행 방법
-
-### GUI 모드 (권장)
-
-```bash
-# 가상환경 활성화 확인
-python run.py
-```
-
-**GUI 컨트롤:**
-- 🟢 **Start Engine**: 시스템 시작
-- 🔴 **Stop Engine**: 안전하게 정지
-- 📊 **Real-time Logs**: 실시간 로그 확인
-
-### 콘솔 모드
-
-```bash
-python -c "from hantubot.core.engine import TradingEngine; TradingEngine().start()"
-```
-
----
-
-## 🎯 전략 시스템
-
-### 내장 전략 3개
-
-#### 1. Opening Breakout Strategy (09:00-09:30)
-
-**개념:** 장 시작 갭 상승 + 거래량 급증 종목 매수
-
-```python
-# 조건
-1. 전일 양봉
-2. 윗꼬리 짧음
-3. 갭 상승 2~7%
-4. 분봉 거래량 전일 평균의 3배 이상
-
-# 청산
-- 익절: +3%
-- 손절: -2%
-- 시간: 09:29 자동 청산
-```
-
-#### 2. Volume Spike Strategy (09:30-14:50)
-
-**개념:** 거래량 순위 급상승 추격 매수
-
-```python
-# 조건 (레짐별 동적 변경)
-- 이전 순위 30위권 밖
-- 현재 순위 10위 안
-- 현재가 1,000원 이상
-
-# 청산
-- 익절: 레짐별 (1.5~3%)
-- 손절: 레짐별 (-1.5~-2%)
-- 순위 이탈: 30위 밖
-- 시간: 14:59 자동 청산
-```
-
-#### 3. Closing Price Advanced Screener (15:03)
-
-**개념:** 종가 매매 + 기술적 분석
-
-```python
-# 조건
-1. 거래량 천만주 이상 또는 상한가
-2. CCI 180 이상 (과매도 반등)
-3. 캔들 점수 80점 이상
-   - 양봉 여부
-   - 윗꼬리/아래꼬리 길이
-   - 거래량 비율
-
-# 청산
-- 다음날 09:00 시초가 매도
-```
-
-### 새 전략 추가 방법
-
-**1단계: 전략 파일 생성**
-
-```python
-# hantubot/strategies/my_strategy.py
-from .base_strategy import BaseStrategy
-import datetime as dt
-
-class MyStrategy(BaseStrategy):
-    def __init__(self, strategy_id, config, broker, clock, notifier):
-        super().__init__(strategy_id, config, broker, clock, notifier)
-        # 내 설정
-        self.my_param = config.get('my_param', 100)
-    
-    async def generate_signal(self, data_payload, portfolio):
-        signals = []
-        now = dt.datetime.now()
-        
-        # 1. 시간 체크
-        if not (10 <= now.hour < 14):
-            return signals
-        
-        # 2. 매도 로직
-        positions = portfolio.get_positions_by_strategy(self.strategy_id)
-        for symbol, position in positions.items():
-            current_price = self.broker.get_current_price(symbol)
-            avg_price = position['avg_price']
-            pnl = ((current_price / avg_price) - 1) * 100
-            
-            if pnl >= 2.0 or pnl <= -1.5:
-                signals.append({
-                    'strategy_id': self.strategy_id,
-                    'symbol': symbol,
-                    'side': 'sell',
-                    'quantity': position['quantity'],
-                    'price': 0,
-                    'order_type': 'market'
-                })
-        
-        # 3. 매수 로직
-        if not positions:
-            # 내 매수 조건
-            target_symbol = "005930"
-            signals.append({
-                'strategy_id': self.strategy_id,
-                'symbol': target_symbol,
-                'side': 'buy',
-                'quantity': 1,
-                'price': 0,
-                'order_type': 'market'
-            })
-        
-        return signals
-```
-
-**2단계: config.yaml에 추가**
-
-```yaml
-active_strategies:
-  - my_strategy  # 추가!
-
-strategy_settings:
-  my_strategy:
-    enabled: true
-    my_param: 150
-```
-
-**3단계: 테스트**
-
+### 3. 실행
 ```bash
 python run.py
-# GUI에서 "Active Strategies"에 표시되는지 확인
+# 또는 start_hantubot.bat 더블클릭
 ```
 
----
-
-## ❓ FAQ
-
-### Q1: 모의투자와 실전투자는 어떻게 전환하나요?
-
-**A:** `configs/config.yaml`에서 `mode` 값만 변경하면 됩니다.
-
-```yaml
-# 모의투자
-mode: mock
-
-# 실전투자 (주의!)
-mode: live
-```
-
-⚠️ **주의:** 실전투자 시 `.env`의 API 키도 실전용으로 변경 필요!
+> 자세한 내용은 **[📘 통합 매뉴얼](docs/MANUAL.md)**을 참고하세요.
 
 ---
 
-### Q2: 프로그램이 자동으로 종료되나요?
+## 📚 문서 가이드
 
-**A:** 네! 다음날 08:50까지 자동으로 대기합니다.
+프로젝트의 모든 문서는 `docs/` 폴더에 정리되어 있습니다.
 
-```
-15:30 장 마감
-  ↓
-후처리 (리포트, 공부법 등)
-  ↓
-다음 거래일 08:50까지 Sleep
-  ↓
-자동 재시작
-```
+### 📘 [MANUAL.md](docs/MANUAL.md)
+**설치부터 실행까지 한 번에!**
+- 환경 설정, API 발급, 이메일/디스코드 알림 설정
+- EXE 배포 방법
 
----
+### 🐍 [PYTHON_GUIDE.md](docs/PYTHON_GUIDE.md)
+**코드 구조를 이해하고 싶다면?**
+- 파이썬 기초 문법 복습
+- Hantubot 아키텍처 및 데이터 흐름
+- 나만의 커스텀 전략 만드는 법
 
-### Q3: 중간에 멈추면 어떻게 하나요?
-
-**A:** GUI에서 "Stop Engine" 또는 `Ctrl+C`로 안전하게 정지됩니다.
-
-- 미체결 주문 자동 취소
-- 포트폴리오 상태 저장
-- 로그 기록 완료
-
----
-
-### Q4: 여러 종목을 동시에 보유할 수 있나요?
-
-**A:** 기본적으로 **1종목만** 보유합니다. (리스크 관리)
-
-변경하려면:
-```yaml
-# config.yaml
-strategy_settings:
-  volume_spike_strategy:
-    params_by_regime:
-      NEUTRAL:
-        max_positions: 3  # 1 → 3
-```
-
----
-
-### Q5: 수수료는 얼마인가요?
-
-**A:** 한국투자증권 기준:
-- **모의투자**: 무료
-- **실전투자**: 
-  - 거래 수수료: 약 0.015%
-  - 거래세: 0.23% (매도 시)
-
----
-
-## 🔧 문제 해결
-
-### 문제 1: "ModuleNotFoundError: No module named 'xxx'"
-
-**원인:** 패키지 미설치
-
-**해결:**
-```bash
-pip install -r requirements.txt
-```
-
----
-
-### 문제 2: "접근 토큰 발급 실패"
-
-**원인:** API 키 오류
-
-**해결:**
-1. `.env` 파일의 API 키 확인
-2. 한국투자증권에서 재발급
-3. 모의/실전 모드 일치 확인
-
----
-
-### 문제 3: GUI가 안 열려요
-
-**원인:** PySide6 설치 오류
-
-**해결:**
-```bash
-pip uninstall PySide6
-pip install PySide6
-```
-
----
-
-### 문제 4: Discord 알림이 안 와요
-
-**원인:** 웹훅 URL 오류
-
-**해결:**
-1. `.env`의 `DISCORD_WEBHOOK_URL` 확인
-2. Discord에서 웹훅 재생성
-3. 테스트 메시지 전송
-
----
-
-### 문제 5: 로그 파일은 어디에?
-
-**위치:**
-```
-logs/
-├── hantubot_root_2025-12-24.log  # 메인 로그
-├── signals_2025-12-24.jsonl      # 신호 로그
-└── trades_2025-12-24.jsonl       # 거래 로그
-
-reports/
-└── report_2025-12-24.md          # 일일 리포트
-```
-
----
-
-## 📚 문서 구조
-
-모든 문서가 `docs/` 폴더로 체계적으로 정리되었습니다.
-
-### 📁 Setup (초기 설정)
-- **[AUTO_BOOT_SETUP.md](docs/setup/AUTO_BOOT_SETUP.md)** - Windows 작업 스케줄러로 자동 시작 설정
-- **[EMAIL_SETUP.md](docs/setup/EMAIL_SETUP.md)** - Gmail 이메일 알림 설정 가이드
-- **[PYTHON_VERSION_GUIDE.md](docs/setup/PYTHON_VERSION_GUIDE.md)** - Python 버전별 설치 가이드
-- **[SETUP_AFTER_FORMAT.md](docs/setup/SETUP_AFTER_FORMAT.md)** - 포맷 후 재설정 체크리스트
-- **[VSCODE_SETUP.md](docs/setup/VSCODE_SETUP.md)** - VS Code 개발 환경 설정
-
-### 🚀 Deployment (배포)
-- **[DEPLOYMENT_GUIDE.md](docs/deployment/DEPLOYMENT_GUIDE.md)** - 실서버 배포 가이드
-- **[STREAMLIT_DEPLOY_GUIDE.md](docs/deployment/STREAMLIT_DEPLOY_GUIDE.md)** - Streamlit 대시보드 배포
-- **[STUDY_DEPLOYMENT.md](docs/deployment/STUDY_DEPLOYMENT.md)** - 유목민 공부법 시스템 배포
-
-### 📖 Guides (사용 가이드)
-- **[LEARNING_GUIDE.md](docs/guides/LEARNING_GUIDE.md)** - Python 기초부터 전략 개발까지
-- **[STUDY_GUIDE.md](docs/guides/STUDY_GUIDE.md)** - 유목민 공부법 상세 가이드
-- **[OPTIMIZATION_GUIDE.md](docs/guides/OPTIMIZATION_GUIDE.md)** - 시스템 최적화 완전 가이드 ⭐ NEW!
-
-### ✅ Verification (검증)
-- **[TRADING_SYSTEM_VERIFICATION.md](docs/verification/TRADING_SYSTEM_VERIFICATION.md)** - 매매 시스템 검증 결과
-- **[15_03_WORKFLOW_VERIFICATION.md](docs/verification/15_03_WORKFLOW_VERIFICATION.md)** - 종가 매매 워크플로우 검증
-- **[CRITICAL_BUGS_FOUND.md](docs/verification/CRITICAL_BUGS_FOUND.md)** - 발견된 버그 및 수정 내역
-
-### 🔧 Development (개발)
-- **[CHANGELOG.md](docs/development/CHANGELOG.md)** - 버전별 변경 이력
-- **[STUDY_UPGRADE_PLAN.md](docs/development/STUDY_UPGRADE_PLAN.md)** - 유목민 공부법 업그레이드 계획
-
----
-
-## 🎓 빠른 시작
-
-### ⚡ 처음 사용하는 분
-1. **[QUICKSTART.md](docs/QUICKSTART.md)** - 10분 설치 + 설정 가이드 ⭐ 시작은 여기서!
-2. **[USER_TODO.md](USER_TODO.md)** - 월요일 실전 전 필수 체크리스트 📝
-3. **[INSPECTION_CHECKLIST.md](INSPECTION_CHECKLIST.md)** - 전수조사 50개 항목 🔍
-
-### 📚 추가 학습 자료
-
-- **[OPTIMIZATION_GUIDE.md](docs/guides/OPTIMIZATION_GUIDE.md)** - 🌟 최신! P0~P2 최적화 완전 가이드
-- **[LEARNING_GUIDE.md](docs/guides/LEARNING_GUIDE.md)** - 파이썬 기초부터 전략 개발까지
-- **[STUDY_GUIDE.md](docs/guides/STUDY_GUIDE.md)** - 유목민 공부법 상세 가이드
-- **[한국투자증권 API 문서](https://apiportal.koreainvestment.com)**
-
----
-
-## 🤝 기여하기
-
-1. Fork the Project
-2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the Branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
----
-
-## 📄 라이선스
-
-이 프로젝트는 MIT 라이선스를 따릅니다. 자세한 내용은 [LICENSE](LICENSE) 파일을 참고하세요.
+### 🕯️ [NOMAD_STUDY.md](docs/NOMAD_STUDY.md)
+**주식 공부를 자동으로!**
+- 유목민 공부법 소개
+- AI 요약 및 대시보드 사용법
 
 ---
 
@@ -644,21 +103,17 @@ reports/
 2. **손실 위험**: 주식 투자는 원금 손실의 위험이 있습니다.
 3. **테스트 권장**: 실전 투자 전 충분한 모의투자 테스트를 권장합니다.
 4. **법적 책임**: 개발자는 이 소프트웨어 사용으로 인한 어떠한 손실에 대해서도 법적 책임을 지지 않습니다.
-5. **교육 목적**: 이 프로젝트는 알고리즘 트레이딩 학습을 위한 교육 자료입니다.
 
 ---
 
 ## 📞 문의
 
 - **GitHub Issues**: [Issues 페이지](https://github.com/PARK-Yunjae/hantubot/issues)
-- **Email**: dbswoql0712@gmail.com
 
 ---
 
 <div align="center">
 
 **⭐ 도움이 되셨다면 Star를 눌러주세요! ⭐**
-
-Made with ❤️ by [PARK-Yunjae](https://github.com/PARK-Yunjae)
 
 </div>

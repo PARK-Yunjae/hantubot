@@ -1,7 +1,12 @@
 # -*- coding: utf-8 -*-
 import sqlite3
+import os
 
-conn = sqlite3.connect('data/study.db')
+# 프로젝트 루트 경로 계산
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DB_PATH = os.path.join(BASE_DIR, 'data', 'study.db')
+
+conn = sqlite3.connect(DB_PATH)
 cursor = conn.cursor()
 
 print("\n=== 최근 실행 기록 ===")

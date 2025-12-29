@@ -1,4 +1,6 @@
 import datetime as dt
+import json
+import os
 from typing import Dict, List, Any
 import pandas as pd
 
@@ -41,6 +43,44 @@ class ClosingPriceStrategy(BaseStrategy):
         
         # 연속 승리 카운터 (동적 파라미터에서 로드)
         self.consecutive_wins = self.dynamic_params.get('consecutive_wins', 0)
+
+        # 재시작 시 오늘 스크리닝 결과 복구
+        self._load_screening_results()
+
+    def _get_screening_file_path(self):
+        """오늘 날짜의 스크리닝 결과 파일 경로"""
+        today_str = dt.datetime.now().strftime("%Y%m%d")
+        # data 디렉토리가 없으면 생성
+        if not os.path.exists('data'):
+            os.makedirs('data')
+        return os.path.join('data', f'closing_price_targets_{today_str}.json')
+
+    def _save_screening_results(self):
+        """스크리닝 결과를 JSON 파일로 저장"""
+        try:
+            file_path = self._get_screening_file_path()
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(self.top_stocks_today, f, ensure_ascii=False, indent=2)
+            logger.info(f"[{self.name}] 💾 스크리닝 결과 저장 완료: {file_path}")
+        except Exception as e:
+            logger.error(f"[{self.name}] 스크리닝 결과 저장 실패: {e}")
+
+    def _load_screening_results(self):
+        """저장된 스크리닝 결과 로드"""
+        try:
+            file_path = self._get_screening_file_path()
+            if os.path.exists(file_path):
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    self.top_stocks_today = json.load(f)
+                
+                if self.top_stocks_today:
+                    logger.info(f"[{self.name}] ♻️ 재시작 후 스크리닝 결과 복구 완료 ({len(self.top_stocks_today)}개)")
+                    # 이미 데이터가 있다는 것은 스크리닝을 했다는 뜻
+                    self.has_webhook_sent_today = True 
+            else:
+                pass
+        except Exception as e:
+            logger.error(f"[{self.name}] 스크리닝 결과 로드 실패: {e}")
 
     async def _perform_screening(self, data_payload: Dict[str, Any], top_volume_stocks: List[Dict]) -> List[Dict[str, Any]]:
         """스크리닝 실행 (15:03에 호출)"""
@@ -153,6 +193,9 @@ class ClosingPriceStrategy(BaseStrategy):
                 # TOP3 추출 및 저장
                 self.top_stocks_today = screened_stocks[:self.strategy_config.top_n_screen]
                 
+                # 💾 결과 파일 저장 (재시작 시 복구용)
+                self._save_screening_results()
+
                 # Discord 웹훅 발송
                 consecutive_wins = self.dynamic_params.get('consecutive_wins', 0)
                 buffer_pct = int((1 - self.logic.get_buffer_ratio(consecutive_wins)) * 100)
