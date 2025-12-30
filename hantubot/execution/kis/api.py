@@ -3,6 +3,8 @@ import time
 import datetime as dt
 from typing import Any, Dict, Optional
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from ...reporting.logger import get_logger
 
 logger = get_logger(__name__)
@@ -21,6 +23,11 @@ class KisApi:
         self.BASE_URL = api_conf['base_url']['mock'] if is_mock else api_conf['base_url']['live']
 
         self._session = requests.Session()
+        # Retry 로직 강화: backoff_factor를 늘려 천천히 재시도, 500번대 에러에 대해 재시도 설정
+        retries = Retry(total=5, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+        self._session.mount('https://', HTTPAdapter(max_retries=retries))
+        self._session.mount('http://', HTTPAdapter(max_retries=retries))
+
         self._token_info: Dict[str, Any] = {}
         self._has_error_occurred = False
         
@@ -88,6 +95,7 @@ class KisApi:
             "appsecret": self._APP_SECRET,
             "tr_id": tr_id,
             "custtype": "P",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
         if hashkey:
             headers["hashkey"] = hashkey
@@ -139,6 +147,12 @@ class KisApi:
                 logger.error(f"JSON 파싱 오류. 응답 상태: {resp.status_code}, 내용: {resp.text[:300]}")
                 return {"rt_cd": "-1", "msg1": "JSON 파싱 오류"}
             except requests.exceptions.RequestException as e:
+                # 500 에러 처리 강화
+                if isinstance(e, requests.exceptions.HTTPError) and e.response is not None and 500 <= e.response.status_code < 600:
+                    logger.warning(f"서버 에러({e.response.status_code}) 발생. 1초 대기 후 재시도... ({attempt + 1}/{max_retries})")
+                    time.sleep(1.0)
+                    continue
+
                 if e.response is not None and e.response.status_code == 404:
                     logger.critical(f"API 경로를 찾을 수 없습니다 (404 Not Found): {full_url}")
                     self._has_error_occurred = True

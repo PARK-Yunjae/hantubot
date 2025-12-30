@@ -99,7 +99,7 @@ def get_logger(name="hantubot") -> logging.Logger:
     global _hantubot_logger_instance, _email_handler_added
     if _hantubot_logger_instance is None:
         # Initial call sets up the root logger configuration
-        _hantubot_logger_instance = CustomLogger("hantubot_root").get_logger()
+        _hantubot_logger_instance = CustomLogger("hantubot").get_logger()
         
         # EmailHandler 추가 (CRITICAL 로그를 이메일로 발송)
         if not _email_handler_added:

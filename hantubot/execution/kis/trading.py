@@ -202,7 +202,7 @@ class KisTrading:
 
     def get_concluded_orders(self) -> list:
         """금일 체결 내역을 조회합니다."""
-        url_path = "/uapi/domestic-stock/v1/trading/inquire-not-concluded-account"
+        url_path = "/uapi/domestic-stock/v1/trading/inquire-daily-ccld"
         tr_id = "TTTC8001R"
         params = {"CANO": self.api.ACCOUNT_NO.split('-')[0], "ACNT_PRDT_CD": self.api.ACCOUNT_NO.split('-')[1] if '-' in self.api.ACCOUNT_NO else '01', "UNPD_CSCN_DVSN": "01"}
         data = self.api.request("GET", url_path, tr_id, params=params)

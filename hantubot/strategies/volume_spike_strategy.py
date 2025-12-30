@@ -8,16 +8,18 @@ from .base_strategy import BaseStrategy
 from ..core.portfolio import Portfolio
 from ..reporting.logger import get_logger
 from ..utils.stock_filters import is_eligible_stock
+from ..providers.naver_news import NaverNewsProvider
 
 logger = get_logger(__name__)
 
 class VolumeSpikeStrategy(BaseStrategy):
     """
-    실시간 거래량 순위 급상승을 감지하여 추격 매수하는 전략.
-    - 시장 레짐(Regime)에 따라 매매 강도와 기준을 동적으로 조절.
-    - 주기적으로 거래량 상위 종목을 스캔.
-    - 순위권 밖에 있던 종목이 특정 순위 안으로 갑자기 진입하면 매수.
-    - 목표 수익률 도달, 손절 라인 터치, 또는 순위 이탈 시 매도.
+    급등주 포착 전략 (유목민 철학 적용)
+    - 기존: 거래량 순위 급상승
+    - 변경: 
+      1. 거래대금 우선 (일 150억 이상만 대상)
+      2. 순간 화력 (1분 거래대금 10억 돌파)
+      3. 뉴스 연동 (특징주, 공시 등 재료 확인)
     """
     def __init__(self, strategy_id: str, config: Dict[str, Any], broker, clock, notifier):
         super().__init__(strategy_id, config, broker, clock, notifier)
@@ -25,6 +27,13 @@ class VolumeSpikeStrategy(BaseStrategy):
         self.last_checked: dt.datetime = None
         self.trade_window_start = dt.time(9, 30)
         self.trade_window_end = dt.time(14, 50)
+        
+        # 뉴스 프로바이더 초기화
+        try:
+            self.news_provider = NaverNewsProvider(max_items_per_ticker=5)
+        except Exception as e:
+            logger.warning(f"[{self.name}] 뉴스 프로바이더 초기화 실패: {e}")
+            self.news_provider = None
         
         # 레짐별 파라미터 로드
         self.params_by_regime = self.config.get('params_by_regime', {})
@@ -83,17 +92,30 @@ class VolumeSpikeStrategy(BaseStrategy):
         if self.last_checked and (now - self.last_checked).total_seconds() < 60:
             return signals
         
-        # 2. API를 통해 현재 순위 조회 및 필터링
+        # 2. API를 통해 현재 순위 조회 및 필터링 (거래대금 기준)
         try:
+            # 거래량 상위 100개 중 필터링
             leaders_raw = self.broker.get_volume_leaders(top_n=100)
             if not leaders_raw:
-                logger.warning(f"[{self.name}] 거래량 상위 종목을 조회할 수 없습니다.")
                 return signals
             
-            volume_leaders = [item for item in leaders_raw if is_eligible_stock(item.get('hts_kor_isnm', ''))]
+            # [유목민 철학] 잡주 제외: 거래대금 150억 미만은 쳐다보지도 않는다.
+            # 하지만 장중에는 누적 거래대금이 150억을 향해 가는 중일 수 있으므로, 
+            # 일단 100억 이상이면 후보로 둠.
+            volume_leaders = []
+            for item in leaders_raw:
+                if not is_eligible_stock(item.get('hts_kor_isnm', '')):
+                    continue
+                try:
+                    tv = float(item.get('acml_tr_pbmn', 0))
+                    if tv >= 10000000000: # 100억 이상
+                        volume_leaders.append(item)
+                except:
+                    pass
+
             current_ranks: Dict[str, int] = {item['mksc_shrn_iscd']: i + 1 for i, item in enumerate(volume_leaders)}
         except Exception as e:
-            logger.error(f"[{self.name}] 거래량 순위 조회 중 오류 발생: {e}", exc_info=True)
+            logger.error(f"[{self.name}] 순위 조회 오류: {e}")
             return signals
 
         # 3. 로직 실행 (매도 또는 매수)
@@ -112,57 +134,121 @@ class VolumeSpikeStrategy(BaseStrategy):
                     elif pnl <= params['stop_loss_pct']:
                         should_sell, reason = True, f"손절 ({pnl:.2f}%)"
                 
+                # 순위 이탈 로직은 거래대금 순위로 대체되었으므로, 너무 밀리면 매도
                 current_rank = current_ranks.get(symbol, 101)
                 if not should_sell and current_rank > params['rank_sell_threshold']:
-                    should_sell, reason = True, f"순위 이탈 ({current_rank}위)"
+                    should_sell, reason = True, f"관심권 이탈 ({current_rank}위)"
                 
                 if should_sell:
-                    logger.info(f"[{self.name}] {symbol} 매도 신호. 사유: {reason}")
                     signals.append({
                         'strategy_id': self.strategy_id, 'symbol': symbol, 'side': 'sell',
-                        'quantity': position['quantity'], 'price': 0, 'order_type': 'market'
+                        'quantity': position['quantity'], 'price': 0, 'order_type': 'market',
+                        'reason': reason
                     })
-                    self.notifier.send_alert(f"[{self.name}/{regime}] 매도: {symbol} ({position['quantity']}주) - {reason}", level='info')
+                    self.notifier.send_alert(f"[{self.name}] 매도: {symbol} - {reason}", level='info')
             
             # 3-2. 매수 로직
             num_positions = len(positions)
             if num_positions < params['max_positions'] and self.previous_ranks:
-                logger.debug(f"[{self.name}/{regime}] 신규 진입 탐색 (현재 보유: {num_positions}, 최대: {params['max_positions']})")
-                
                 for symbol, rank in current_ranks.items():
-                    # 이미 보유 중인 종목은 건너뛰기
-                    if symbol in positions:
-                        continue
+                    if symbol in positions: continue
                         
                     prev_rank = self.previous_ranks.get(symbol, 101)
-                    logger.debug(f"[{self.name}/{regime}] 종목 {symbol}: 이전 순위 {prev_rank}, 현재 순위 {rank}")
-
+                    
+                    # [유목민 철학] 순위 급상승 + 순간 화력 체크
                     if prev_rank > params['rank_jump_prev_threshold'] and rank <= params['rank_jump_buy_threshold']:
-                        current_price = self.broker.get_current_price(symbol)
-                        if current_price < 2000: continue
+                        # 1분봉 데이터 조회하여 순간 거래대금 확인
+                        minute_data = self.broker.get_intraday_minute_data(symbol)
+                        if not minute_data: continue
                         
-                        available_cash = portfolio.get_cash()
-                        
-                        # 동적 파라미터에서 자본 배분 가중치 가져오기 (기본값 1.0)
-                        allocation_weight = self.dynamic_params.get('capital_allocation_weight', 1.0)
-                        
-                        # 전체 현금의 93%를 최대 포지션 수로 나눈 금액에 가중치 적용
-                        # [최적화] 시장가 주문 슬리피지 7% 버퍼 적용 (93% 사용)
-                        buy_amount = (available_cash * 0.93 * allocation_weight) / params['max_positions']
-                        quantity = int(buy_amount // current_price)
+                        try:
+                            # 최근 1분 거래대금
+                            current_1m_value = float(minute_data[0].get('acml_tr_pbmn', 0))
+                            
+                            # [유목민 철학 1] 1분 거래대금 10억 돌파 (강력한 매수세) - 1차 필터
+                            if current_1m_value < 1000000000:
+                                continue
 
-                        if quantity == 0: continue
+                            # [유목민 철학 2] 기술적 분석 필터 (캔들, 거래량, 추세) - 2차 필터
+                            # API 호출 비용이 크므로 1차 필터 통과한 놈만 검사
+                            hist_data = self.broker.get_historical_daily_data(symbol, days=120)
+                            if not hist_data or len(hist_data) < 20: continue
+                            
+                            df = pd.DataFrame(hist_data)
+                            for col in ['stck_clpr', 'stck_oprc', 'stck_hgpr', 'acml_vol']:
+                                if col in df.columns:
+                                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                            
+                            # 데이터 정렬 및 MA 계산
+                            df = df.sort_values(by='stck_bsop_date').reset_index(drop=True)
+                            df['ma20'] = ta.trend.sma_indicator(df['stck_clpr'], window=20)
+                            
+                            today_candle = df.iloc[-1] # 현재(오늘) 캔들
+                            prev_candle = df.iloc[-2]  # 전일 캔들
+                            
+                            current_price = float(today_candle['stck_clpr'])
+                            open_price = float(today_candle['stck_oprc'])
+                            high_price = float(today_candle['stck_hgpr'])
+                            
+                            # A. 캔들 패턴 필터
+                            # 양봉 필수
+                            if current_price <= open_price: continue
+                            # 윗꼬리 제한 (High - Close) <= (Close - Open) * 2
+                            upper_shadow = high_price - current_price
+                            body = current_price - open_price
+                            if body > 0 and upper_shadow > body * 2: continue
 
-                        reason = f"순위 급상승 {prev_rank}→{rank}"
-                        logger.info(f"[{self.name}/{regime}] 매수 신호: {symbol} {quantity}주 ({reason})")
-                        signals.append({
-                            'strategy_id': self.strategy_id, 'symbol': symbol, 'side': 'buy',
-                            'quantity': quantity, 'price': 0, 'order_type': 'market',
-                        })
-                        self.notifier.send_alert(f"[{self.name}/{regime}] 매수: {symbol} {quantity}주 ({reason})", level='info')
-                        # 매수 신호 발생 후 다음 신호 탐색을 위해 break. 한 번에 하나씩만 매수.
-                        break
-        
+                            # B. 거래량 분석 필터
+                            # 당일 거래량 > 전일 거래량 * 2 (200% 이상 급증)
+                            current_vol = float(today_candle['acml_vol'])
+                            prev_vol = float(prev_candle['acml_vol'])
+                            if prev_vol > 0 and current_vol < prev_vol * 2:
+                                continue # 거래량 폭발력 부족
+
+                            # C. 추세 필터
+                            # MA20 지지 (현재가 > 20일선)
+                            ma20 = float(today_candle['ma20'])
+                            if not pd.isna(ma20) and current_price <= ma20:
+                                continue
+
+                            # D. 뉴스 확인 (재료가 있는가?)
+                            news_score = 0
+                            news_title = ""
+                            if self.news_provider:
+                                news_items = self.news_provider.fetch_news(symbol, symbol)
+                                for news in news_items:
+                                    if '특징주' in news['title'] or '공시' in news['title']:
+                                        news_score = 1
+                                        news_title = news['title']
+                                        break
+                            
+                            # 뉴스가 없으면 진입 기준을 더 높임 (1분 20억)
+                            if news_score == 0 and current_1m_value < 2000000000:
+                                continue
+
+                            available_cash = portfolio.get_cash()
+                            buy_amount = (available_cash * 0.95) / params['max_positions']
+                            quantity = int(buy_amount // current_price)
+
+                            if quantity == 0: continue
+
+                            reason = f"화력(1분 {current_1m_value/100000000:.1f}억) + 거래량200% + MA20지지"
+                            if news_title:
+                                reason += f" + 뉴스({news_title[:10]}...)"
+
+                            logger.info(f"[{self.name}] 매수 신호: {symbol} {quantity}주 ({reason})")
+                            signals.append({
+                                'strategy_id': self.strategy_id, 'symbol': symbol, 'side': 'buy',
+                                'quantity': quantity, 'price': 0, 'order_type': 'market',
+                                'reason': reason
+                            })
+                            self.notifier.send_alert(f"[{self.name}] 강력 매수: {symbol} {quantity}주 ({reason})", level='info')
+                            break # 한 번에 하나만
+                            
+                        except Exception as e:
+                            logger.error(f"매수 로직 상세 오류: {e}")
+                            continue
+
         except Exception as e:
             logger.error(f"[{self.name}] 신호 생성 로직 중 오류 발생: {e}", exc_info=True)
 

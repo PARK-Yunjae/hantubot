@@ -20,11 +20,10 @@ class ClosingPriceStrategy(BaseStrategy):
     """
     고급 종가매매 스크리너 전략. (v3 리팩토링 버전)
     
-    점수 체계:
-    - CCI 점수 (30%): CCI 180 근처일수록 고득점
-    - 거래량 점수 (25%): 평균 대비 거래량 폭증
-    - ADX 점수 (20%): 추세 강도
-    - 캔들패턴 점수 (25%): 양봉 + 윗꼬리 짧음 + 고가-종가 근접
+    [가산점 기반 랭킹 시스템 적용]
+    1. 후보 수집: 거래대금 등 기본 필터 통과 종목 점수 계산
+    2. 순위 선정: 점수(Score) 내림차순 -> 거래대금 내림차순
+    3. 최종 선발: 상위 랭크 종목 선정
     
     동작: 15:03에 조건에 맞는 상위 3개 종목을 점수와 함께 Discord로 알림
     """
@@ -82,74 +81,159 @@ class ClosingPriceStrategy(BaseStrategy):
         except Exception as e:
             logger.error(f"[{self.name}] 스크리닝 결과 로드 실패: {e}")
 
-    async def _perform_screening(self, data_payload: Dict[str, Any], top_volume_stocks: List[Dict]) -> List[Dict[str, Any]]:
-        """스크리닝 실행 (15:03에 호출)"""
-        screened_stocks = []
+    async def calculate_score(self, ticker: str, data_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        개별 종목에 대한 점수 계산 및 유효성 검증
+        """
+        result = {'valid': False, 'symbol': ticker, 'score': 0, 'reason': '', 'features': {}}
         
+        try:
+            # 일봉 데이터 조회 (기술적 지표 계산용)
+            hist_data = data_payload['historical_daily'].get(ticker)
+            if not hist_data:
+                hist_data = self.broker.get_historical_daily_data(ticker, days=30)
+                if hist_data:
+                    data_payload['historical_daily'][ticker] = hist_data
+            
+            if not hist_data or len(hist_data) < self.strategy_config.sma_period:
+                return result
+
+            df = pd.DataFrame(hist_data)
+            for col in ['stck_clpr', 'stck_hgpr', 'stck_lwpr', 'acml_vol', 'stck_oprc']:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+            
+            df = df.sort_values(by='stck_bsop_date').reset_index(drop=True)
+            
+            # 1. [유목민 철학] 가격 지지 확인: 현재가가 시가 대비 +3% 이상인지 확인
+            today_candle = df.iloc[-1]
+            today_open = float(today_candle['stck_oprc'])
+            current_price = float(today_candle['stck_clpr']) # 장중에는 현재가
+            trading_value = float(today_candle.get('acml_tr_pbmn', 0)) if 'acml_tr_pbmn' in today_candle else 0
+            # 만약 hist_data에 거래대금 정보가 없다면 실시간 데이터에서 가져와야 함 (상위 레벨에서 주입받거나 여기서 조회)
+            
+            if today_open > 0:
+                change_from_open = ((current_price - today_open) / today_open) * 100
+                if change_from_open < 3.0:
+                    return result # 3% 이상 상승 유지하지 못하면 탈락
+            
+            # 2. 지표 계산
+            indicators = self.logic.calculate_indicators(df)
+            if 'error' in indicators:
+                return result
+                
+            sma20 = indicators['sma20']
+            
+            # 3. 필수 필터 (20일선 위에 있어야 함)
+            if pd.isna(sma20) or current_price <= sma20:
+                return result
+            
+            # 4. 캔들 점수 및 종합 점수 계산
+            candle_score, is_bullish, candle_details = self.logic.calculate_candle_score(df)
+            
+            # [유목민 철학] 캔들 패턴 필터 강화
+            # A. 양봉 필수
+            if not is_bullish: return result
+            
+            # B. 윗꼬리 제한 (몸통의 2배 이하)
+            open_p = float(today_candle['stck_oprc'])
+            high_p = float(today_candle['stck_hgpr'])
+            close_p = float(today_candle['stck_clpr'])
+            
+            upper_shadow = high_p - close_p
+            body = close_p - open_p
+            if body > 0 and upper_shadow > body * 2: return result
+            
+            # C. 꽉 찬 종가 (고가 대비 -2% 이내)
+            if close_p < high_p * 0.98: return result
+
+            total_score, score_detail = self.logic.calculate_total_score(indicators, candle_score, is_bullish)
+            
+            # [유목민 철학] 거래대금 가산점 (150억: 0점, 500억: 10점, 1000억: 20점)
+            # 여기서는 trading_value가 정확해야 함
+            tv_score = 0
+            if trading_value >= 100000000000: # 1000억
+                tv_score = 20
+                score_detail += "|대금(1000억+):+20"
+            elif trading_value >= 50000000000: # 500억
+                tv_score = 10
+                score_detail += "|대금(500억+):+10"
+            
+            total_score += tv_score
+
+            result.update({
+                'valid': True,
+                'price': int(current_price),
+                'score': float(round(total_score, 2)),
+                'trading_value': trading_value,
+                'features': {
+                    'cci': float(round(indicators['cci'], 1)),
+                    'adx': float(round(indicators['adx'], 1)),
+                    'is_bullish': bool(is_bullish),
+                    'score_detail': str(score_detail),
+                    'candle_detail': str(candle_details)
+                },
+                'reason': score_detail
+            })
+            
+        except Exception as e:
+            logger.error(f"[{self.name}] {ticker} 점수 계산 중 오류: {e}")
+            
+        return result
+
+    async def _perform_screening(self, data_payload: Dict[str, Any], top_volume_stocks: List[Dict]) -> List[Dict[str, Any]]:
+        """스크리닝 실행 (후보 수집 -> 정렬 -> 선발)"""
+        candidates = []
+        
+        # 설정에서 최소 거래대금 가져오기 (없으면 기본 150억)
+        min_trading_value = self.config.get('stock_filter', {}).get('min_trading_value_daily', 15000000000)
+
+        # [Step 1] 후보 수집 (Collection)
         for stock_data in top_volume_stocks:
             ticker = stock_data.get('mksc_shrn_iscd')
             stock_name = stock_data.get('hts_kor_isnm')
+            
+            # 거래대금 1차 필터 (목록 조회 시 이미 포함된 정보 활용)
+            try:
+                trading_value = float(stock_data.get('acml_tr_pbmn', 0))
+            except (ValueError, TypeError):
+                trading_value = 0
+            
+            if trading_value < min_trading_value:
+                continue
+
             if not ticker or not stock_name:
                 continue
 
-            try:
-                # 일봉 데이터 조회
-                hist_data = data_payload['historical_daily'].get(ticker)
-                if not hist_data:
-                    hist_data = self.broker.get_historical_daily_data(ticker, days=30)
-                    if hist_data:
-                        data_payload['historical_daily'][ticker] = hist_data
+            # 점수 계산
+            result = await self.calculate_score(ticker, data_payload)
+            
+            # 점수가 60점(Cut-off) 이상인 종목만 후보에 추가
+            if result.get('valid') and result.get('score') >= 60:
+                # API 데이터의 거래대금이 더 정확할 수 있으므로 업데이트
+                if result.get('trading_value', 0) == 0:
+                    result['trading_value'] = trading_value
                 
-                if not hist_data or len(hist_data) < self.strategy_config.sma_period:
-                    continue
-
-                df = pd.DataFrame(hist_data)
-                for col in ['stck_clpr', 'stck_hgpr', 'stck_lwpr', 'acml_vol']:
-                    if col in df.columns:
-                        df[col] = pd.to_numeric(df[col], errors='coerce')
-                
-                if 'stck_oprc' in df.columns:
-                    df['stck_oprc'] = pd.to_numeric(df['stck_oprc'], errors='coerce')
-                
-                df = df.sort_values(by='stck_bsop_date').reset_index(drop=True)
-                
-                # 1. 지표 계산
-                indicators = self.logic.calculate_indicators(df)
-                if 'error' in indicators:
-                    continue
-                    
-                current_price = indicators['price']
-                sma20 = indicators['sma20']
-                current_cci = indicators['cci']
-                
-                # 2. 필수 필터
-                if pd.isna(sma20) or current_price <= sma20:
-                    continue
-                if current_cci < 100:
-                    continue
-                
-                # 3. 캔들 점수 계산
-                candle_score, is_bullish, candle_details = self.logic.calculate_candle_score(df)
-                
-                # 4. 종합 점수 계산
-                total_score, score_detail = self.logic.calculate_total_score(indicators, candle_score, is_bullish)
-                
-                screened_stocks.append({
-                    'name': stock_name,
-                    'ticker': ticker,
-                    'price': current_price,
-                    'score': round(total_score, 2),
-                    'cci': round(indicators['cci'], 1),
-                    'adx': round(indicators['adx'], 1),
-                    'is_bullish': is_bullish,
-                    'score_detail': score_detail,
-                    'candle_detail': candle_details
+                # 반환 포맷 맞추기
+                features = result['features']
+                candidates.append({
+                    'name': str(stock_name),
+                    'ticker': str(ticker),
+                    'price': result['price'],
+                    'score': result['score'],
+                    'trading_value': result['trading_value'],
+                    'cci': features['cci'],
+                    'adx': features['adx'],
+                    'is_bullish': features['is_bullish'],
+                    'score_detail': features['score_detail'],
+                    'candle_detail': features['candle_detail']
                 })
-                
-            except Exception as e:
-                logger.error(f"[{self.name}] {ticker} 분석 중 오류: {e}")
         
-        return sorted(screened_stocks, key=lambda x: x['score'], reverse=True)
+        # [Step 2] 순위 선정 (Ranking)
+        # 점수(score) 기준 내림차순, 동점 시 거래대금(trading_value) 내림차순
+        candidates.sort(key=lambda x: (x['score'], x['trading_value']), reverse=True)
+        
+        return candidates
 
     async def generate_signal(self, data_payload: Dict[str, Any], portfolio: Portfolio) -> List[Dict[str, Any]]:
         signals: List[Dict[str, Any]] = []
@@ -183,14 +267,14 @@ class ClosingPriceStrategy(BaseStrategy):
                 ]
                 logger.info(f"[{self.name}] 적격 종목 {len(top_volume_stocks)}개 발견")
                 
-                # 스크리닝 실행
+                # 스크리닝 실행 (랭킹 시스템 적용)
                 screened_stocks = await self._perform_screening(data_payload, top_volume_stocks)
                 
                 if not screened_stocks:
                     self.notifier.send_alert("종가매매 스크리너 결과, 조건에 맞는 종목이 없습니다.", level='info')
                     return signals
                 
-                # TOP3 추출 및 저장
+                # [Step 3] 최종 선발 (Selection) - TOP 3 저장
                 self.top_stocks_today = screened_stocks[:self.strategy_config.top_n_screen]
                 
                 # 💾 결과 파일 저장 (재시작 시 복구용)
@@ -210,6 +294,7 @@ class ClosingPriceStrategy(BaseStrategy):
                         "value": (
                             f"**종합 점수: {stock['score']}점**\n"
                             f"📊 {stock['score_detail']}\n"
+                            f"💰 대금: {stock['trading_value']/100000000:.0f}억\n"
                             f"📈 CCI: {stock['cci']} | ADX: {stock['adx']}\n"
                             f"🕯️ {stock['candle_detail']}\n"
                             f"💰 현재가: {stock['price']:,.0f}원"
@@ -220,7 +305,7 @@ class ClosingPriceStrategy(BaseStrategy):
                 embed = {
                     "title": f"🔔 종가매매 후보 TOP3 (15:03)",
                     "description": (
-                        f"**양봉 + CCI 180 근처 + 추세강도 + 거래량 종합 분석**\n"
+                        f"**가산점 기반 랭킹 시스템 적용**\n"
                         f"연속 승리: {consecutive_wins}회 | 버퍼: {buffer_pct}%\n"
                         f"⏰ 15:15-15:19에 1위 종목 자동 매수 예정"
                     ),
@@ -257,6 +342,7 @@ class ClosingPriceStrategy(BaseStrategy):
             logger.info(f"[{self.name}] ===== 15:15-15:19 매수 실행 =====")
             self.has_bought_today = True
             
+            # 최종 선발: 1위 종목
             top_stock = self.top_stocks_today[0]
             logger.info(f"[{self.name}] 1위 종목 {top_stock['name']} ({top_stock['ticker']}) 매수 신호 생성")
             
@@ -272,14 +358,7 @@ class ClosingPriceStrategy(BaseStrategy):
             # 매수 수량 계산
             available_cash = portfolio.get_cash()
             
-            # 거래대금 정보 가져오기 (이미 메모리에 없을 수 있으므로 다시 조회하거나 저장된 정보 사용)
-            # 여기서는 top_stock 정보에는 거래대금 정보가 없으므로 다시 조회하거나 보수적으로 접근
-            # Logic의 get_buffer_ratio는 거래대금 정보가 없으면 기본값 사용
             consecutive_wins = self.dynamic_params.get('consecutive_wins', 0)
-            
-            # top_stocks_today는 simple dict이므로 거래대금 정보가 누락되었을 수 있음
-            # 정확성을 위해 다시 조회하거나, 이전 단계에서 저장했어야 함.
-            # 일단 여기서는 기본 버퍼 사용 (safe)
             buffer_ratio = self.logic.get_buffer_ratio(consecutive_wins, None)
             
             order_amount = available_cash * buffer_ratio
