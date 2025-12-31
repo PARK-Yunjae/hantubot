@@ -227,3 +227,57 @@ class KisTrading:
         
         logger.error(f"체결 내역 조회 실패: {data.get('msg1')}")
         return []
+
+    def get_open_orders(self) -> list:
+        """미체결 내역을 조회합니다."""
+        url_path = "/uapi/domestic-stock/v1/trading/inquire-nccs"
+        tr_id = "TTTC8003R" if not self.api.IS_MOCK else "VTTC8003R"
+        
+        params = {
+            "CANO": self.api.ACCOUNT_NO.split('-')[0],
+            "ACNT_PRDT_CD": self.api.ACCOUNT_NO.split('-')[1] if '-' in self.api.ACCOUNT_NO else '01',
+            "INQR_DVSN1": "0", # 0:전체, 1:매도, 2:매수
+            "INQR_DVSN2": "0", # 0:전체
+            "CTX_AREA_FK100": "",
+            "CTX_AREA_NK100": ""
+        }
+        
+        data = self.api.request("GET", url_path, tr_id, params=params)
+        
+        if str(data.get("rt_cd")) == "0":
+            return data.get('output1', [])
+        
+        logger.error(f"미체결 내역 조회 실패: {data.get('msg1')}")
+        return []
+
+    def cancel_order(self, order_id: str, quantity: int = 0, total: bool = True) -> bool:
+        """주문을 취소합니다."""
+        url_path = "/uapi/domestic-stock/v1/trading/order-rvsecncl"
+        tr_id = "TTTC0803U" if not self.api.IS_MOCK else "VTTC0803U"
+        
+        qty_str = "0" if total else str(quantity)
+        
+        body = {
+            "CANO": self.api.ACCOUNT_NO.split('-')[0],
+            "ACNT_PRDT_CD": self.api.ACCOUNT_NO.split('-')[1] if '-' in self.api.ACCOUNT_NO else '01',
+            "KRX_FWDG_ORD_ORGNO": "", 
+            "ORGN_ODNO": order_id,
+            "ORD_DVSN": "00", 
+            "RVSE_CNCL_DVSN_CD": "02", # 02: 취소
+            "ORD_QTY": qty_str,
+            "ORD_UNPR": "0",
+            "QTY_ALL_ORD_YN": "Y" if total else "N",
+        }
+        
+        hashkey = self.api.get_hashkey(body)
+        if not hashkey:
+            return False
+            
+        data = self.api.request("POST", url_path, tr_id, body=body, hashkey=hashkey)
+        
+        if str(data.get("rt_cd")) == "0":
+            logger.info(f"주문 취소 성공 (Order ID: {order_id})")
+            return True
+            
+        logger.error(f"주문 취소 실패 (Order ID: {order_id}): {data.get('msg1')}")
+        return False

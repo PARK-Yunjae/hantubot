@@ -83,3 +83,9 @@ class Broker:
 
     def get_concluded_orders(self) -> list:
         return self.trading.get_concluded_orders()
+
+    def get_open_orders(self) -> list:
+        return self.trading.get_open_orders()
+
+    def cancel_order(self, order_id: str, quantity: int = 0, total: bool = True, order_type: str = None) -> bool:
+        return self.trading.cancel_order(order_id, quantity, total)

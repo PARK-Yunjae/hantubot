@@ -81,7 +81,7 @@ class ClosingPriceStrategy(BaseStrategy):
         except Exception as e:
             logger.error(f"[{self.name}] 스크리닝 결과 로드 실패: {e}")
 
-    async def calculate_score(self, ticker: str, data_payload: Dict[str, Any]) -> Dict[str, Any]:
+    def calculate_score(self, ticker: str, data_payload: Dict[str, Any]) -> Dict[str, Any]:
         """
         개별 종목에 대한 점수 계산 및 유효성 검증
         """
@@ -182,18 +182,20 @@ class ClosingPriceStrategy(BaseStrategy):
         return result
 
     async def _perform_screening(self, data_payload: Dict[str, Any], top_volume_stocks: List[Dict]) -> List[Dict[str, Any]]:
-        """스크리닝 실행 (후보 수집 -> 정렬 -> 선발)"""
+        """스크리닝 실행 (후보 수집 -> 정렬 -> 선발) - 병렬 처리 적용"""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
         candidates = []
         
         # 설정에서 최소 거래대금 가져오기 (없으면 기본 150억)
         min_trading_value = self.config.get('stock_filter', {}).get('min_trading_value_daily', 15000000000)
 
-        # [Step 1] 후보 수집 (Collection)
+        # 1차 필터링 대상 수집
+        targets = []
         for stock_data in top_volume_stocks:
             ticker = stock_data.get('mksc_shrn_iscd')
             stock_name = stock_data.get('hts_kor_isnm')
             
-            # 거래대금 1차 필터 (목록 조회 시 이미 포함된 정보 활용)
             try:
                 trading_value = float(stock_data.get('acml_tr_pbmn', 0))
             except (ValueError, TypeError):
@@ -204,31 +206,46 @@ class ClosingPriceStrategy(BaseStrategy):
 
             if not ticker or not stock_name:
                 continue
-
-            # 점수 계산
-            result = await self.calculate_score(ticker, data_payload)
             
-            # 점수가 60점(Cut-off) 이상인 종목만 후보에 추가
-            if result.get('valid') and result.get('score') >= 60:
-                # API 데이터의 거래대금이 더 정확할 수 있으므로 업데이트
-                if result.get('trading_value', 0) == 0:
-                    result['trading_value'] = trading_value
-                
-                # 반환 포맷 맞추기
-                features = result['features']
-                candidates.append({
-                    'name': str(stock_name),
-                    'ticker': str(ticker),
-                    'price': result['price'],
-                    'score': result['score'],
-                    'trading_value': result['trading_value'],
-                    'cci': features['cci'],
-                    'adx': features['adx'],
-                    'is_bullish': features['is_bullish'],
-                    'score_detail': features['score_detail'],
-                    'candle_detail': features['candle_detail']
-                })
-        
+            targets.append((ticker, stock_name, trading_value))
+
+        # [Step 1] 후보 수집 (병렬 처리)
+        # 최대 10개 스레드로 동시에 채점
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            # calculate_score가 동기 함수여야 함 (async 제거 완료)
+            future_to_info = {
+                executor.submit(self.calculate_score, ticker, data_payload): (ticker, stock_name, trading_value)
+                for ticker, stock_name, trading_value in targets
+            }
+            
+            for future in as_completed(future_to_info):
+                ticker, stock_name, trading_value = future_to_info[future]
+                try:
+                    result = future.result()
+                    
+                    # 점수가 60점(Cut-off) 이상인 종목만 후보에 추가
+                    if result.get('valid') and result.get('score') >= 60:
+                        # API 데이터의 거래대금이 더 정확할 수 있으므로 업데이트
+                        if result.get('trading_value', 0) == 0:
+                            result['trading_value'] = trading_value
+                        
+                        # 반환 포맷 맞추기
+                        features = result['features']
+                        candidates.append({
+                            'name': str(stock_name),
+                            'ticker': str(ticker),
+                            'price': result['price'],
+                            'score': result['score'],
+                            'trading_value': result['trading_value'],
+                            'cci': features['cci'],
+                            'adx': features['adx'],
+                            'is_bullish': features['is_bullish'],
+                            'score_detail': features['score_detail'],
+                            'candle_detail': features['candle_detail']
+                        })
+                except Exception as e:
+                    logger.error(f"[{self.name}] 채점 중 에러 ({ticker}): {e}")
+
         # [Step 2] 순위 선정 (Ranking)
         # 점수(score) 기준 내림차순, 동점 시 거래대금(trading_value) 내림차순
         candidates.sort(key=lambda x: (x['score'], x['trading_value']), reverse=True)

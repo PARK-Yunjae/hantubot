@@ -49,6 +49,10 @@ class TradingEngine:
         self._sent_0930_report = False
         self._sent_1500_report = False
         
+        # [Safety] 서킷 브레이커 설정
+        self.error_count = 0
+        self.last_error_time = None
+        
         self._load_strategies()
         self._running = False
         logger.info("트레이딩 엔진 초기화 완료.")
@@ -463,109 +467,129 @@ class TradingEngine:
         post_market_run_today = False
 
         while self._running:
-            now = dt.datetime.now()
-            logger.debug(f"트레이딩 루프 틱: {now.strftime('%H:%M:%S')}")
+            try:
+                now = dt.datetime.now()
+                logger.debug(f"트레이딩 루프 틱: {now.strftime('%H:%M:%S')}")
 
-            is_trading_day = self.market_clock.is_trading_day(now.date())
+                is_trading_day = self.market_clock.is_trading_day(now.date())
 
-            if is_trading_day:
-                if self.market_clock.is_market_open(now):
-                    post_market_run_today = False
-                    logger.debug("장이 열려있습니다. 전략 실행 준비 중.")
-                    
-                    # 09:01 장 시작 시 모든 포지션 청산 (최우선 처리)
-                    if now.hour == 9 and now.minute == 1:
-                        await self._process_market_open_logic()
-                        # 청산 후 3초 대기 (체결 처리 시간)
-                        await asyncio.sleep(3)
-                    
-                    # 전략별 시간대 강제 청산 체크 (우선 처리)
-                    liquidated = await self._check_forced_liquidation()
-                    if liquidated:
-                        logger.info("⚠️ 강제 청산 실행됨. 전략 실행 건너뜀 (청산 우선).")
-                        # 청산 후 3초 대기하고 다음 루프로
-                        await asyncio.sleep(3)
-                        continue  # 전략 실행 건너뛰고 다음 루프로
-                    
-                    # 청산이 없을 때만 전략 실행
-                    logger.debug("데이터 페이로드 준비 중...")
-                    data_payload = await self._prepare_data_payload()
-                    logger.debug("데이터 페이로드 준비 완료. 전략 실행 중...")
-                    
-                    is_closing_time = self.market_clock.is_market_closing_approach(now)
-                    await self._run_strategies(data_payload, closing_call=is_closing_time)
-                    logger.debug("전략 실행 완료.")
-                    
-                    interval = self.config.get('trading_loop_interval_seconds', 60)
-                    logger.debug(f"다음 틱까지 {interval}초 대기 중...")
-                    for _ in range(interval):
+                if is_trading_day:
+                    if self.market_clock.is_market_open(now):
+                        post_market_run_today = False
+                        logger.debug("장이 열려있습니다. 전략 실행 준비 중.")
+                        
+                        # 09:01 장 시작 시 모든 포지션 청산 (최우선 처리)
+                        if now.hour == 9 and now.minute == 1:
+                            await self._process_market_open_logic()
+                            # 청산 후 3초 대기 (체결 처리 시간)
+                            await asyncio.sleep(3)
+                        
+                        # 전략별 시간대 강제 청산 체크 (우선 처리)
+                        liquidated = await self._check_forced_liquidation()
+                        if liquidated:
+                            logger.info("⚠️ 강제 청산 실행됨. 전략 실행 건너뜀 (청산 우선).")
+                            # 청산 후 3초 대기하고 다음 루프로
+                            await asyncio.sleep(3)
+                            continue  # 전략 실행 건너뛰고 다음 루프로
+                        
+                        # 청산이 없을 때만 전략 실행
+                        logger.debug("데이터 페이로드 준비 중...")
+                        data_payload = await self._prepare_data_payload()
+                        logger.debug("데이터 페이로드 준비 완료. 전략 실행 중...")
+                        
+                        is_closing_time = self.market_clock.is_market_closing_approach(now)
+                        await self._run_strategies(data_payload, closing_call=is_closing_time)
+                        logger.debug("전략 실행 완료.")
+                        
+                        interval = self.config.get('trading_loop_interval_seconds', 60)
+                        logger.debug(f"다음 틱까지 {interval}초 대기 중...")
+                        for _ in range(interval):
+                            if not self._running:
+                                break
+                            await asyncio.sleep(1)
+                        
+                        continue
+                    elif now.time() >= self.market_clock.get_market_times()['close'] and not post_market_run_today:
+                        logger.debug("장이 마감되었습니다. 장 마감 후 로직 실행 중.")
+                        await self._process_post_market_logic()
+                        post_market_run_today = True
+                        
+                        # 15:40 자동 종료 체크
+                        auto_shutdown_enabled = os.getenv('AUTO_SHUTDOWN_ENABLED', 'false').lower() == 'true'
+                        shutdown_time_str = os.getenv('AUTO_SHUTDOWN_TIME', '15:40')
+                        
+                        if auto_shutdown_enabled:
+                            try:
+                                shutdown_hour, shutdown_minute = map(int, shutdown_time_str.split(':'))
+                                shutdown_time = dt.time(shutdown_hour, shutdown_minute)
+                                
+                                if now.time() >= shutdown_time:
+                                    logger.info("=" * 80)
+                                    logger.info(f"자동 종료 시간({shutdown_time_str})에 도달했습니다.")
+                                    logger.info("일일 작업 완료 - 프로그램을 정상 종료합니다.")
+                                    logger.info("=" * 80)
+                                    self.notifier.send_alert("✅ Hantubot 일일 작업 완료 - 정상 종료", level='info')
+                                    self._running = False
+                                    break
+                                else:
+                                    logger.info(f"자동 종료 예정: {shutdown_time_str} ({shutdown_time_str} - 현재 {now.strftime('%H:%M')})")
+                            except ValueError:
+                                logger.error(f"AUTO_SHUTDOWN_TIME 형식 오류: {shutdown_time_str} (HH:MM 형식 사용)")
+                
+                # 장 외 시간이거나, 비거래일이거나, 장 마감 후 로직을 이미 실행한 경우
+                logger.debug("장외 시간이거나 비거래일입니다. 장시간 대기 준비 중.")
+                next_trading_day = now.date()
+                
+                # [Hotfix] 스케줄링 로직 개선: 장 중(08:50 ~ 15:30)에 켜졌다면 내일로 넘기지 않음
+                market_times = self.market_clock.get_market_times()
+                market_close_time = market_times.get('close', dt.time(15, 30))
+                
+                # 현재 시간이 기상 시간(08:50) 이후이고, 장 마감(15:30) 이전이라면 "오늘" 매매해야 함
+                # 따라서 "장 마감 시간이 지났을 때만" 내일로 넘김
+                if now.time() >= market_close_time:
+                    next_trading_day += dt.timedelta(days=1)
+                elif now.time() >= wake_up_time and not is_trading_day:
+                    # 비거래일인데 기상 시간이 지났으면 내일로 (휴일 09:00에 켠 경우 등)
+                    next_trading_day += dt.timedelta(days=1)
+                # 거래일이고 장 마감 전이면 next_trading_day는 오늘 날짜 그대로 유지 -> 즉시 루프 재진입 시도
+
+                while not self.market_clock.is_trading_day(next_trading_day):
+                    next_trading_day += dt.timedelta(days=1)
+                
+                next_wake_up = dt.datetime.combine(next_trading_day, wake_up_time)
+                sleep_duration = (next_wake_up - now).total_seconds()
+                
+                if sleep_duration > 0:
+                    logger.info(f"다음 기상 시간 {next_wake_up.strftime('%Y-%m-%d %H:%M')}까지 대기합니다. (약 {sleep_duration / 3600:.1f}시간)")
+                    # 긴 잠을 짧은 잠으로 쪼개어, 중간에 종료 신호를 받을 수 있도록 함
+                    end_time = dt.datetime.now() + dt.timedelta(seconds=sleep_duration)
+                    while dt.datetime.now() < end_time:
                         if not self._running:
+                            logger.info("대기 중 정지 신호를 감지하여 루프를 종료합니다.")
                             break
                         await asyncio.sleep(1)
+                
+                if not self._running:
+                    break
+            
+            except Exception as e:
+                # [Safety] 서킷 브레이커 로직
+                now = dt.datetime.now()
+                # 1분 지났으면 에러 카운트 리셋
+                if self.last_error_time and (now - self.last_error_time).total_seconds() > 60:
+                    self.error_count = 0
+                
+                self.error_count += 1
+                self.last_error_time = now
+                
+                logger.critical(f"시스템 크리티컬 에러 ({self.error_count}/5): {e}", exc_info=True)
+                
+                if self.error_count >= 5:
+                    self.notifier.send_alert("🚨 [긴급] 에러 과다 발생으로 봇을 강제 종료합니다.", level='critical')
+                    self.stop() # 봇 종료
+                    break
                     
-                    continue
-                elif now.time() >= self.market_clock.get_market_times()['close'] and not post_market_run_today:
-                    logger.debug("장이 마감되었습니다. 장 마감 후 로직 실행 중.")
-                    await self._process_post_market_logic()
-                    post_market_run_today = True
-                    
-                    # 15:40 자동 종료 체크
-                    auto_shutdown_enabled = os.getenv('AUTO_SHUTDOWN_ENABLED', 'false').lower() == 'true'
-                    shutdown_time_str = os.getenv('AUTO_SHUTDOWN_TIME', '15:40')
-                    
-                    if auto_shutdown_enabled:
-                        try:
-                            shutdown_hour, shutdown_minute = map(int, shutdown_time_str.split(':'))
-                            shutdown_time = dt.time(shutdown_hour, shutdown_minute)
-                            
-                            if now.time() >= shutdown_time:
-                                logger.info("=" * 80)
-                                logger.info(f"자동 종료 시간({shutdown_time_str})에 도달했습니다.")
-                                logger.info("일일 작업 완료 - 프로그램을 정상 종료합니다.")
-                                logger.info("=" * 80)
-                                self.notifier.send_alert("✅ Hantubot 일일 작업 완료 - 정상 종료", level='info')
-                                self._running = False
-                                break
-                            else:
-                                logger.info(f"자동 종료 예정: {shutdown_time_str} ({shutdown_time_str} - 현재 {now.strftime('%H:%M')})")
-                        except ValueError:
-                            logger.error(f"AUTO_SHUTDOWN_TIME 형식 오류: {shutdown_time_str} (HH:MM 형식 사용)")
-            
-            # 장 외 시간이거나, 비거래일이거나, 장 마감 후 로직을 이미 실행한 경우
-            logger.debug("장외 시간이거나 비거래일입니다. 장시간 대기 준비 중.")
-            next_trading_day = now.date()
-            
-            # [Hotfix] 스케줄링 로직 개선: 장 중(08:50 ~ 15:30)에 켜졌다면 내일로 넘기지 않음
-            market_times = self.market_clock.get_market_times()
-            market_close_time = market_times.get('close', dt.time(15, 30))
-            
-            # 현재 시간이 기상 시간(08:50) 이후이고, 장 마감(15:30) 이전이라면 "오늘" 매매해야 함
-            # 따라서 "장 마감 시간이 지났을 때만" 내일로 넘김
-            if now.time() >= market_close_time:
-                next_trading_day += dt.timedelta(days=1)
-            elif now.time() >= wake_up_time and not is_trading_day:
-                 # 비거래일인데 기상 시간이 지났으면 내일로 (휴일 09:00에 켠 경우 등)
-                next_trading_day += dt.timedelta(days=1)
-            # 거래일이고 장 마감 전이면 next_trading_day는 오늘 날짜 그대로 유지 -> 즉시 루프 재진입 시도
-
-            while not self.market_clock.is_trading_day(next_trading_day):
-                next_trading_day += dt.timedelta(days=1)
-            
-            next_wake_up = dt.datetime.combine(next_trading_day, wake_up_time)
-            sleep_duration = (next_wake_up - now).total_seconds()
-            
-            if sleep_duration > 0:
-                logger.info(f"다음 기상 시간 {next_wake_up.strftime('%Y-%m-%d %H:%M')}까지 대기합니다. (약 {sleep_duration / 3600:.1f}시간)")
-                # 긴 잠을 짧은 잠으로 쪼개어, 중간에 종료 신호를 받을 수 있도록 함
-                end_time = dt.datetime.now() + dt.timedelta(seconds=sleep_duration)
-                while dt.datetime.now() < end_time:
-                    if not self._running:
-                        logger.info("대기 중 정지 신호를 감지하여 루프를 종료합니다.")
-                        break
-                    await asyncio.sleep(1)
-            
-            if not self._running:
-                break
+                await asyncio.sleep(5) # 에러 나면 5초 정도 숨 고르기
 
     def start(self):
         """트레이딩 엔진을 시작합니다."""

@@ -53,6 +53,21 @@ class OrderManager:
         price = signal.get('price', 0) # 시장가 주문의 경우 가격이 없을 수 있음
         order_type = signal.get('order_type', 'limit')
 
+        # [Order Cleanup] 매수 신호 시, 기존 미체결 주문 전량 취소 (설거지 로직)
+        if side == 'buy':
+            try:
+                open_orders = self._broker.get_open_orders()
+                if open_orders:
+                    logger.info(f"[Order Cleanup] 매수 전 미체결 주문 {len(open_orders)}건 발견. 전량 취소를 진행합니다.")
+                    for order in open_orders:
+                        order_id = order.get('odno')
+                        rem_qty = int(order.get('nccs_qty', 0))
+                        if order_id and rem_qty > 0:
+                            self._broker.cancel_order(order_id, rem_qty, True, "00")
+                            logger.info(f"[Order Cleanup] 미체결 주문 취소 완료: {order_id} ({rem_qty}주)")
+            except Exception as e:
+                logger.error(f"[Order Cleanup] 미체결 주문 취소 중 오류 발생: {e}")
+
         # --- [최종 방어] 신호 유효성 검증 ---
         symbol = str(symbol).strip()
 
