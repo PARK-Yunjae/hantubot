@@ -1,177 +1,185 @@
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, List, Tuple
 import pandas as pd
-from ta.trend import cci, sma_indicator, ADXIndicator
+from ta.trend import CCIIndicator, SMAIndicator
 from .config import ClosingPriceConfig
 
 class ClosingPriceLogic:
-    """종가매매 전략의 핵심 계산 로직"""
+    """
+    [ClosingPriceLogic v4] 2025년 유동성 기준 + 정교한 필터링(MA20, 캔들)
+    
+    1. 기본 필터 (Essential)
+       - 가격: 2,000원 이상
+       - 추세: 현재가 >= MA20
+       - 캔들: 양봉, 윗꼬리 관리 (몸통보다 너무 길면 탈락)
+       
+    2. 스코어링 (총 100점)
+       - A. 거래대금 (50점): 3,000억 이상 50점 ~ 1,000억 미만 0점
+       - B. CCI 추세 (30점): 100~200 구간 최적
+       - C. 등락률 (20점): 15~29% 구간 최적
+       
+    3. 선발 로직 (Plan B 포함)
+       - [1군] 1,000억+ & 필터 통과
+       - [2군] 300억+ & 필터 통과 (1군 없을 시)
+    """
     
     def __init__(self, config: ClosingPriceConfig):
         self.config = config
 
-    def calculate_candle_score(self, df: pd.DataFrame) -> Tuple[float, bool, str]:
-        """
-        캔들 패턴 점수 계산
-        Returns: (score, is_bullish, details_str)
-        """
-        if len(df) < 2:
-            return 0, False, "데이터부족"
-        
+    def _calculate_cci(self, df: pd.DataFrame, period: int = 14) -> float:
+        """CCI 지표 계산"""
         try:
-            today_open = float(df['stck_oprc'].iloc[-1]) if 'stck_oprc' in df.columns and len(df) >= 1 else float(df['stck_clpr'].iloc[-2]) if len(df) >= 2 else 0
-            today_close = float(df['stck_clpr'].iloc[-1])
-            today_high = float(df['stck_hgpr'].iloc[-1])
-            today_low = float(df['stck_lwpr'].iloc[-1])
-        except (IndexError, ValueError) as e:
-            return 0, False, f"데이터오류:{e}"
-        
-        # 1. 양봉 여부
-        is_bullish = today_close > today_open
-        if not is_bullish:
-            return 0, False, "음봉"
-        
-        # 2. 캔들 범위
-        candle_range = today_high - today_low
-        if candle_range == 0:
-            return 0, False, "범위없음"
-        
-        body_size = today_close - today_open
-        upper_shadow = today_high - today_close
-        
-        # 3. 윗꼬리 비율 (낮을수록 좋음)
-        upper_shadow_ratio = upper_shadow / candle_range
-        score_upper_shadow = max(0, 100 - (upper_shadow_ratio * 200))
-        
-        # 4. 몸통 비율 (클수록 좋음)
-        body_ratio = body_size / candle_range
-        score_body = min(100, body_ratio * 150)
-        
-        # 5. 고가-종가 근접도
-        high_close_gap = (today_high - today_close) / today_close * 100
-        score_high_close = max(0, 100 - (high_close_gap * 50))
-        
-        # 종합 점수
-        total_score = (score_upper_shadow * 0.4) + (score_body * 0.3) + (score_high_close * 0.3)
-        details = f"윗꼬리:{upper_shadow_ratio*100:.1f}%|몸통:{body_ratio*100:.1f}%|고종갭:{high_close_gap:.2f}%"
-        
-        return total_score, True, details
+            if df is None or len(df) < period:
+                return 0.0
+            
+            cci_indicator = CCIIndicator(
+                high=df['stck_hgpr'], 
+                low=df['stck_lwpr'], 
+                close=df['stck_clpr'], 
+                window=period
+            )
+            return cci_indicator.cci().iloc[-1]
+        except Exception:
+            return 0.0
 
-    def get_buffer_ratio(self, consecutive_wins: int, stock_data: Dict[str, Any] = None) -> float:
-        """연속 승리 횟수 + 거래대금에 따른 버퍼 비율 결정"""
-        # 기본 버퍼 (연속 승리 기반)
-        if consecutive_wins >= 5:
-            base_buffer = 0.93  # 7% 버퍼
-        elif consecutive_wins >= 3:
-            base_buffer = 0.92  # 8% 버퍼
-        elif consecutive_wins >= 2:
-            base_buffer = 0.91  # 9% 버퍼
-        else:
-            base_buffer = 0.90  # 10% 버퍼
+    def _is_good_candle(self, open_p: float, high_p: float, low_p: float, close_p: float) -> Tuple[bool, str]:
+        """
+        좋은 양봉인지 판단
+        1. 양봉 필수 (Close >= Open)
+        2. 윗꼬리가 몸통의 2배를 넘지 않아야 함 (너무 긴 윗꼬리 제외)
+        """
+        if close_p < open_p:
+            return False, "음봉"
+            
+        body = close_p - open_p
+        upper_shadow = high_p - close_p
         
-        # 거래대금 기반 추가 조정
-        if stock_data:
-            try:
-                trading_value_str = stock_data.get('data_rank', '0')
-                trading_value = float(trading_value_str) if trading_value_str else 0
-                
-                if trading_value >= 100_000_000_000:
-                    base_buffer = min(0.95, base_buffer + 0.02)
-                elif trading_value >= 10_000_000_000:
-                    base_buffer = min(0.94, base_buffer + 0.01)
-            except (ValueError, TypeError):
-                pass
-        
-        return base_buffer
+        # 몸통이 거의 없는 도지형 양봉은 윗꼬리 비율 계산 시 주의
+        if body == 0:
+            if upper_shadow > 0: # 윗꼬리만 있는 비석형 등
+                return False, "도지/비석형"
+            return True, "점상/보합" # 점상 등은 통과
+            
+        ratio = upper_shadow / body
+        if ratio > 2.0:
+            return False, f"윗꼬리과다({ratio:.1f}배)"
+            
+        return True, "적격캔들"
 
-    def calculate_indicators(self, df: pd.DataFrame) -> Dict[str, Any]:
-        """지표 계산"""
-        result = {}
-        
+    def is_valid_candidate(self, df: pd.DataFrame, stock_info: Dict[str, Any] = None) -> Tuple[bool, str]:
+        """
+        기본 필터 검증 (가격, MA20, 캔들)
+        """
+        if df is None or len(df) < 20:
+            return False, "데이터부족"
+            
         try:
-            # 1. Price & SMA
-            current_price = df['stck_clpr'].iloc[-1]
-            sma20 = sma_indicator(df['stck_clpr'], window=self.config.sma_period).iloc[-1]
+            today = df.iloc[-1]
             
-            # 2. CCI
-            try:
-                current_cci = cci(df['stck_hgpr'], df['stck_lwpr'], df['stck_clpr'], window=self.config.cci_period).iloc[-1]
-                if pd.isna(current_cci):
-                    current_cci = 0
-            except:
-                current_cci = 0
-                
-            # 3. ADX
-            try:
-                adx_indicator = ADXIndicator(df['stck_hgpr'], df['stck_lwpr'], df['stck_clpr'], window=self.config.adx_period)
-                current_adx = adx_indicator.adx().iloc[-1]
-                if pd.isna(current_adx):
-                    current_adx = 0
-            except:
-                current_adx = 0
-                
-            # 4. Volume SMA
-            vol_sma = sma_indicator(df['acml_vol'], window=self.config.volume_sma_period).iloc[-1]
-            last_volume = df['acml_vol'].iloc[-1]
-            
-            result = {
-                'price': current_price,
-                'sma20': sma20,
-                'cci': current_cci,
-                'adx': current_adx,
-                'volume': last_volume,
-                'vol_sma': vol_sma
-            }
-        except Exception as e:
-            result['error'] = str(e)
-            
-        return result
-
-    def calculate_total_score(self, indicators: Dict[str, Any], candle_score: float, is_bullish: bool) -> Tuple[float, str]:
-        """종합 점수 계산"""
-        current_cci = indicators.get('cci', 0)
-        current_adx = indicators.get('adx', 0)
-        current_price = indicators.get('price', 0)
-        sma20 = indicators.get('sma20', 0)
-        last_volume = indicators.get('volume', 0)
-        vol_sma = indicators.get('vol_sma', 0)
-        
-        # CCI 점수 (25%)
-        score_cci = max(0, 100 - abs(current_cci - self.config.cci_target) * 1.5)
-        
-        # 거래량 점수 (25%)
-        if pd.isna(vol_sma) or vol_sma == 0:
-            score_volume = 50
-        else:
-            score_volume = min(100, (last_volume / vol_sma) * 50)
-            
-        # ADX 점수 (15%)
-        score_adx = min(100, current_adx * 2.5)
-        
-        # 캔들 점수 조정
-        final_candle_score = candle_score if is_bullish else 0
-        candle_details = "음봉(감점)" if not is_bullish else ""
-        
-        # 이평선 점수 (10%)
-        if pd.isna(sma20) or sma20 == 0:
-            score_sma = 50
-        else:
-            gap_from_sma = ((current_price - sma20) / sma20) * 100
-            if current_price > sma20:
-                score_sma = min(100, 50 + gap_from_sma * 5)
+            # 데이터 추출 (API 데이터 우선)
+            if stock_info:
+                current_price = float(stock_info.get('stck_prpr', today['stck_clpr']))
+                open_price = float(stock_info.get('stck_oprc', today['stck_oprc']))
+                high_price = float(stock_info.get('stck_hgpr', today['stck_hgpr']))
+                low_price = float(stock_info.get('stck_lwpr', today['stck_lwpr']))
             else:
-                score_sma = max(0, 50 + gap_from_sma * 5)
+                current_price = float(today['stck_clpr'])
+                open_price = float(today['stck_oprc'])
+                high_price = float(today['stck_hgpr'])
+                low_price = float(today['stck_lwpr'])
 
-        total_score = (
-            (score_cci * 0.25) + 
-            (score_volume * 0.25) + 
-            (score_adx * 0.15) + 
-            (final_candle_score * 0.25) + 
-            (score_sma * 0.10)
-        )
-        
-        if is_bullish:
-            total_score += 10
+            # 1. 동전주 제외
+            if current_price < 2000:
+                return False, f"동전주({current_price}원)"
+
+            # 2. MA20 추세 확인
+            # 과거 데이터로 MA20 계산 (오늘 포함 20일)
+            sma20 = df['stck_clpr'].rolling(window=20).mean().iloc[-1]
+            if pd.isna(sma20):
+                return False, "MA20계산불가"
             
-        score_detail = f"CCI:{round(score_cci)}|거래량:{round(score_volume)}|ADX:{round(score_adx)}|캔들:{round(final_candle_score)}|이평:{round(score_sma)}"
+            if current_price < sma20:
+                return False, f"MA20이탈({current_price} < {sma20:.0f})"
+
+            # 3. 캔들 분석
+            is_good, reason = self._is_good_candle(open_price, high_price, low_price, current_price)
+            if not is_good:
+                return False, reason
+
+            return True, "통과"
+
+        except Exception as e:
+            return False, f"에러:{str(e)}"
+
+    def calculate_score(self, current_price: float, trading_value: float, change_rate: float, cci_val: float) -> Tuple[float, str]:
+        """
+        점수 계산 (100점 만점) - 2025년 기준
+        Returns: (total_score, score_detail_str)
+        """
+        score_tv = 0
+        score_cci = 0
+        score_rate = 0
         
-        return total_score, score_detail
+        # A. 거래대금 (50점)
+        if trading_value >= 300_000_000_000: # 3000억 이상
+            score_tv = 50
+        elif trading_value >= 200_000_000_000: # 2000억 ~ 3000억
+            score_tv = 40
+        elif trading_value >= 150_000_000_000: # 1500억 ~ 2000억
+            score_tv = 30
+        elif trading_value >= 100_000_000_000: # 1000억 ~ 1500억
+            score_tv = 20
+        else:
+            score_tv = 0 # 1000억 미만
+            
+        # B. CCI 추세 (30점)
+        if 100 <= cci_val <= 200:
+            score_cci = 30
+        elif cci_val > 200:
+            score_cci = 20
+        elif 0 <= cci_val < 100:
+            score_cci = 15
+        else:
+            score_cci = 0
+            
+        # C. 등락률 (20점)
+        if 15 <= change_rate <= 29:
+            score_rate = 20
+        elif 5 <= change_rate < 15:
+            score_rate = 15
+        else:
+            score_rate = 5
+            
+        total_score = score_tv + score_cci + score_rate
+        detail = f"대금({score_tv})+CCI({score_cci})+등락({score_rate})"
+        
+        return total_score, detail
+
+    def get_indicators(self, df: pd.DataFrame) -> Dict[str, float]:
+        """필요한 보조지표 일괄 계산"""
+        return {
+            'cci': self._calculate_cci(df)
+        }
+
+    def filter_and_rank(self, candidates: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], str]:
+        """
+        후보군 필터링 및 랭킹 선정 (1군 -> 2군)
+        Returns: (selected_top_3, selection_type)
+        """
+        # 이미 is_valid_candidate를 통과한 종목들만 candidates에 들어옴
+        # 따라서 거래대금 기준만 적용하면 됨
+        
+        # [1군] 유목민 메이저: 거래대금 1,000억 이상
+        group_1 = [c for c in candidates if c['trading_value'] >= 100_000_000_000]
+        
+        if group_1:
+            group_1.sort(key=lambda x: x['score'], reverse=True)
+            return group_1[:3], "1군(메이저)"
+            
+        # [2군] Plan B: 1군 없을 시, 거래대금 300억 이상
+        group_2 = [c for c in candidates if c['trading_value'] >= 30_000_000_000]
+        
+        if group_2:
+            group_2.sort(key=lambda x: x['score'], reverse=True)
+            return group_2[:3], "2군(마이너)"
+            
+        return [], "없음"
