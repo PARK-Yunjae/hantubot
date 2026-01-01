@@ -82,7 +82,13 @@ class VolumeSpikeStrategy(BaseStrategy):
         # 0. 현재 레짐과 파라미터 가져오기
         regime = current_data.get("regime", "NEUTRAL") # 엔진으로부터 레짐 정보 수신
         params = self._get_current_params(regime)
-        if not params or not params.get('trade_enabled', False):
+        
+        # [변경] 거래 활성화 체크 (전역 설정 force_trade_enabled 우선 적용)
+        is_trade_enabled = params.get('trade_enabled', False)
+        if self.global_config.get('force_trade_enabled', False):
+            is_trade_enabled = True
+            
+        if not params or not is_trade_enabled:
             # logger.debug(f"[{self.name}] 현재 레짐 '{regime}'({params.get('name')})에서는 거래가 비활성화되어 있습니다.")
             return signals
 
@@ -227,8 +233,13 @@ class VolumeSpikeStrategy(BaseStrategy):
                                 continue
 
                             available_cash = portfolio.get_cash()
-                            buy_amount = (available_cash * 0.95) / params['max_positions']
-                            quantity = int(buy_amount // current_price)
+                            
+                            # [변경] 공통 매수 수량 계산 메서드 사용
+                            # max_positions는 이미 params에서 1로 고정되도록 권고됨 (Config 참조)
+                            # 하지만 안전을 위해 max_positions로 나누는 로직은 유지하되, buy_cash_ratio는 calculate_buy_quantity 내부에서 적용됨
+                            # calculate_buy_quantity는 전체 가용 현금 기준이므로, max_positions 고려하여 현금 배분
+                            allocated_cash = available_cash / params['max_positions']
+                            quantity = self.calculate_buy_quantity(current_price, allocated_cash)
 
                             if quantity == 0: continue
 

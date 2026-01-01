@@ -33,6 +33,11 @@ class Notifier:
             logger.info("Discord notifications enabled.")
         else:
             logger.info("Discord notifications disabled in config.yaml.")
+            
+        # Dedup(중복 방지)을 위한 메모리 저장소
+        # Key: dedup_key, Value: timestamp
+        self._dedup_cache = {}
+        self._last_cleanup_date = datetime.date.today()
 
     def _load_config(self, config_path):
         """Loads configuration from config.yaml."""
@@ -87,12 +92,41 @@ class Notifier:
     # 향후 Slack 등 다른 알림 채널 확장을 위한 send_slack_message 등 추가 가능
     # 현재는 Discord만 구현합니다.
 
+    def _check_and_update_dedup(self, key: str) -> bool:
+        """
+        중복 방지 키를 확인하고, 이미 처리된 키라면 True를 반환합니다.
+        새로운 키라면 캐시에 추가하고 False를 반환합니다.
+        날짜가 바뀌면 캐시를 초기화합니다.
+        """
+        today = datetime.date.today()
+        if self._last_cleanup_date != today:
+            self._dedup_cache.clear()
+            self._last_cleanup_date = today
+            
+        if key in self._dedup_cache:
+            return True
+            
+        self._dedup_cache[key] = datetime.datetime.now()
+        return False
+
     def send_alert(self, message: str, level: str = 'info', **kwargs):
         """
         통합된 알림 전송 메서드.
         주요 이벤트를 Discord로 전송하고, 로거에도 기록합니다.
         kwargs를 통해 Discord embed 형식의 추가 정보를 전달할 수 있습니다.
+        
+        Args:
+            message: 알림 메시지
+            level: 로그 레벨 (info, warning, error, critical)
+            dedup_key: 중복 방지 키 (이 키가 같으면 하루에 한 번만 전송됨)
+            embed: Discord 임베드 메시지
         """
+        # Dedup 체크
+        dedup_key = kwargs.get('dedup_key')
+        if dedup_key and self._check_and_update_dedup(dedup_key):
+            logger.info(f"Duplicate alert suppressed (dedup_key: {dedup_key}): {message}")
+            return
+
         # 로거에 기록
         log_method = getattr(logger, level.lower(), logger.info)
         log_method(message)

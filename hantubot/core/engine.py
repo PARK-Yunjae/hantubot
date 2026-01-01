@@ -89,9 +89,13 @@ class TradingEngine:
                 strategy_class_name = ''.join(word.capitalize() for word in strat_name.split('_'))
                 strategy_class = getattr(module, strategy_class_name)
 
+                # 전역 설정(global_config)을 전략에 전달하기 위해 병합하거나 별도 파라미터로 전달
+                # 여기서는 strategy_config 내에 '_global' 키로 전체 설정을 포함시킴
+                strategy_config['_global'] = self.config
+
                 strategy_instance = strategy_class(
                     strategy_id=strat_name,
-                    config=strategy_config, # 개별 전략 설정을 전달
+                    config=strategy_config, # 개별 전략 설정 + 전역 설정(_global)
                     broker=self.broker,
                     clock=self.market_clock,
                     notifier=self.notifier
@@ -331,7 +335,8 @@ class TradingEngine:
         """
         전략별 시간대 강제 청산 로직 (우선 처리)
         
-        시간대 종료 1분 전부터 청산하여 시간 넘어가는 일 방지
+        - 09:29: 오전 단타(opening_breakout) 청산
+        - 14:48: 오후 단타(volume_spike) 청산 (종가매매 15:03 전, 현금 확보)
         """
         now = dt.datetime.now()
         positions = self.portfolio.get_positions()
@@ -347,9 +352,8 @@ class TradingEngine:
         for symbol, position in list(positions.items()):
             strategy_id = position.get('strategy_id', '')
             
-            # opening_breakout_strategy: 09:29부터 청산 시작
+            # opening_breakout_strategy: 09:29부터 청산 시작 (09:30 종료)
             if 'opening_breakout' in strategy_id:
-                # 09:29 이상이면 청산 (1분 전부터 시작)
                 if (now.hour == 9 and now.minute >= 29) or now.hour > 9:
                     logger.warning(f"[우선 청산] {symbol} - opening_breakout 시간 종료 임박 (09:30)")
                     sell_signal = {
@@ -363,13 +367,13 @@ class TradingEngine:
                     self.order_manager.process_signal(sell_signal)
                     liquidated = True
             
-            # volume_spike_strategy: 14:58부터 청산 시작 (2분 여유)
+            # volume_spike_strategy: 14:48부터 청산 시작 (14:50 종료 및 종가매매 준비)
+            # 15:03 종가 스크리닝, 15:15 종가 매수
             elif 'volume_spike' in strategy_id:
-                # 14:58 이상이면 청산 (종가매매와 충돌 방지)
-                if (now.hour == 14 and now.minute >= 58) or now.hour >= 15:
-                    logger.warning(f"[우선 청산] {symbol} - volume_spike 시간 종료 임박 (15:00, 2분 전 청산)")
+                if (now.hour == 14 and now.minute >= 48) or now.hour >= 15:
+                    logger.warning(f"[우선 청산] {symbol} - volume_spike 시간 종료 임박 (14:50, 종가매매 준비)")
                     sell_signal = {
-                        'strategy_id': 'forced_liquidation_1500',
+                        'strategy_id': 'forced_liquidation_1450',
                         'symbol': symbol,
                         'side': 'sell',
                         'quantity': position['quantity'],
@@ -430,34 +434,56 @@ class TradingEngine:
             logger.debug("현재 시간에 실행할 활성 전략이 없습니다.")
 
     async def _process_post_market_logic(self):
-        """장 종료 후 실행될 로직."""
-        logger.info("장 종료. 후처리 로직을 실행합니다.")
-        self.notifier.send_alert("장 종료. 리포트 생성 및 학습 루틴 실행 중.", level='info')
+        """
+        장 종료 후 실행될 로직. (순차 실행 보장)
+        Step 1) 전일 종가매매 후보 성과 평가
+        Step 2) 유목민 공부법 (일일 스터디)
+        Step 3) 일일 리포트 생성 및 전송
+        Step 4) 전략 최적화 (선택)
+        """
+        logger.info("장 종료. 후처리 파이프라인을 시작합니다.")
+        self.notifier.send_alert("🏁 장 종료. 후처리 파이프라인(평가->공부->리포트) 시작.", level='info')
         
-        # 1. 일일 리포트 생성
+        # Step 1) 전일 종가매매 후보 성과 평가 (신규)
         try:
-            report_generator = ReportGenerator(config=self.config, notifier=self.notifier)
-            report_generator.generate_daily_report()
+            logger.info("[Pipeline Step 1] 종가매매 성과 평가 시작")
+            from ..study.analyzer import StudyAnalyzer
+            analyzer = StudyAnalyzer(self.broker)
+            analyzer.evaluate_closing_candidates()
+            logger.info("[Pipeline Step 1] 종가매매 성과 평가 완료")
         except Exception as e:
-            logger.error(f"일일 리포트 생성 실패: {e}", exc_info=True)
-            self.notifier.send_alert("일일 리포트 생성 중 오류가 발생했습니다.", level='error')
+            logger.error(f"종가매매 성과 평가 실패: {e}", exc_info=True)
+            self.notifier.send_alert("❌ 종가매매 성과 평가 중 오류 발생", level='error')
 
-        # 2. "100일 공부" 자동화 루틴 실행
+        # Step 2) "100일 공부" 자동화 루틴 실행
         try:
-            # 장 마감 후 1시간 이내 재실행이면 강제 실행 (force_run=True)
+            logger.info("[Pipeline Step 2] 유목민 공부법 실행")
             now = dt.datetime.now()
-            force_run = now.hour <= 16 and now.minute <= 30  # 16:30까지는 강제 실행
+            force_run = now.hour <= 16 and now.minute <= 30
             run_daily_study(broker=self.broker, notifier=self.notifier, force_run=force_run)
+            logger.info("[Pipeline Step 2] 유목민 공부법 완료")
         except Exception as e:
             logger.error(f"데일리 스터디 자료 생성 실패: {e}", exc_info=True)
-            self.notifier.send_alert("데일리 스터디 자료 생성 중 오류가 발생했습니다.", level='error')
+            self.notifier.send_alert("❌ 데일리 스터디 자료 생성 중 오류 발생", level='error')
 
-        # 3. 일일 전략 최적화 루틴 실행
+        # Step 3) 일일 리포트 생성 (평가 결과 포함)
         try:
+            logger.info("[Pipeline Step 3] 일일 리포트 생성")
+            report_generator = ReportGenerator(config=self.config, notifier=self.notifier)
+            report_generator.generate_daily_report()
+            logger.info("[Pipeline Step 3] 일일 리포트 생성 완료")
+        except Exception as e:
+            logger.error(f"일일 리포트 생성 실패: {e}", exc_info=True)
+            self.notifier.send_alert("❌ 일일 리포트 생성 중 오류 발생", level='error')
+
+        # Step 4) 일일 전략 최적화 루틴 실행
+        try:
+            logger.info("[Pipeline Step 4] 전략 최적화 실행")
             run_daily_optimization()
+            logger.info("[Pipeline Step 4] 전략 최적화 완료")
         except Exception as e:
             logger.error(f"일일 전략 최적화 루틴 실행 실패: {e}", exc_info=True)
-            self.notifier.send_alert("일일 전략 최적화 루틴 실행 중 오류가 발생했습니다.", level='error')
+            # 최적화 실패는 크리티컬하지 않으므로 알림은 생략하거나 warning으로
 
         logger.info("모든 장 마감 후 작업 완료.")
 

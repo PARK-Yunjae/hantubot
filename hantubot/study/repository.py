@@ -140,6 +140,44 @@ class StudyDatabase:
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+
+            # 7. closing_candidates 테이블 (종가매매 후보군)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS closing_candidates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trade_date TEXT NOT NULL,
+                    generated_at TEXT NOT NULL,
+                    rank INTEGER NOT NULL,
+                    ticker TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    score REAL,
+                    reason TEXT,
+                    selection_type TEXT,
+                    market_trend TEXT,
+                    price_at_signal INTEGER,
+                    trading_value INTEGER,
+                    sector TEXT,
+                    raw_payload_json TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(trade_date, ticker)
+                )
+            """)
+
+            # 8. closing_candidate_results 테이블 (종가매매 성과 평가)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS closing_candidate_results (
+                    candidate_id INTEGER PRIMARY KEY,
+                    ticker TEXT NOT NULL,
+                    eval_date TEXT NOT NULL,
+                    next_open_return_pct REAL,
+                    next_close_return_pct REAL,
+                    next_day_mfe_pct REAL,
+                    next_day_mae_pct REAL,
+                    volume_ratio REAL,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(candidate_id) REFERENCES closing_candidates(id)
+                )
+            """)
             
             # 인덱스 생성
             cursor.execute("""
@@ -611,6 +649,77 @@ class StudyDatabase:
                 ORDER BY count DESC
             """, (days,))
             return [dict(row) for row in cursor.fetchall()]
+
+    # ==================== Closing Price Strategy 관리 ====================
+
+    def insert_closing_candidate(self, candidate: Dict):
+        """
+        종가매매 후보군 삽입
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute("""
+                    INSERT OR REPLACE INTO closing_candidates
+                    (trade_date, generated_at, rank, ticker, name, score, reason, 
+                     selection_type, market_trend, price_at_signal, trading_value, sector, raw_payload_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    candidate['trade_date'],
+                    candidate['generated_at'],
+                    candidate['rank'],
+                    candidate['ticker'],
+                    candidate['name'],
+                    candidate.get('score'),
+                    candidate.get('reason'),
+                    candidate.get('selection_type'),
+                    candidate.get('market_trend'),
+                    candidate.get('price_at_signal'),
+                    candidate.get('trading_value'),
+                    candidate.get('sector'),
+                    json.dumps(candidate.get('raw_payload_json', {}), ensure_ascii=False)
+                ))
+                logger.debug(f"Inserted closing candidate: {candidate['ticker']}")
+            except Exception as e:
+                logger.error(f"Failed to insert closing candidate {candidate.get('ticker')}: {e}")
+
+    def get_closing_candidates(self, trade_date: str) -> List[Dict]:
+        """특정 날짜의 종가매매 후보군 조회"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT * FROM closing_candidates
+                WHERE trade_date = ?
+                ORDER BY rank ASC
+            """, (trade_date,))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def insert_closing_result(self, result: Dict):
+        """
+        종가매매 성과 평가 결과 삽입
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute("""
+                    INSERT OR REPLACE INTO closing_candidate_results
+                    (candidate_id, ticker, eval_date, next_open_return_pct, next_close_return_pct, 
+                     next_day_mfe_pct, next_day_mae_pct, volume_ratio, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    result['candidate_id'],
+                    result['ticker'],
+                    result['eval_date'],
+                    result.get('next_open_return_pct'),
+                    result.get('next_close_return_pct'),
+                    result.get('next_day_mfe_pct'),
+                    result.get('next_day_mae_pct'),
+                    result.get('volume_ratio'),
+                    datetime.now().isoformat()
+                ))
+                logger.debug(f"Inserted closing result for candidate_id: {result['candidate_id']}")
+            except Exception as e:
+                logger.error(f"Failed to insert closing result for {result.get('ticker')}: {e}")
 
 
 # ==================== 헬퍼 함수 ====================

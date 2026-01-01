@@ -8,10 +8,135 @@ from typing import List, Dict
 
 import google.generativeai as genai
 
+from datetime import datetime, timedelta
 from hantubot.reporting.logger import get_logger
-from hantubot.study.repository import StudyDatabase
+from hantubot.study.repository import StudyDatabase, get_study_db
 
 logger = get_logger(__name__)
+
+
+class StudyAnalyzer:
+    """
+    학습 및 성과 분석을 담당하는 클래스
+    - 전일 종가매매 후보 성과 평가
+    - 학습 데이터 분석
+    """
+    def __init__(self, broker):
+        self.broker = broker
+        self.db = get_study_db()
+
+    def evaluate_closing_candidates(self):
+        """
+        전일 선정된 종가매매 후보군(TOP3)의 성과를 평가하고 DB에 저장
+        """
+        try:
+            # 1. 평가 대상 날짜 (전일) 계산
+            # 실제 거래일 기준으로 전일을 찾아야 함.
+            # 여기서는 간단히 어제를 조회하지만, 휴일 고려가 필요할 수 있음.
+            # 하지만 closing_candidates 테이블에 데이터가 있는 가장 최근 날짜를 찾는 것이 안전함.
+            
+            # 오늘 날짜
+            today = datetime.now()
+            
+            # 최근 7일 중 데이터가 있는 날짜 검색 (역순)
+            target_date = None
+            candidates = []
+            
+            for i in range(1, 8):
+                check_date = (today - timedelta(days=i)).strftime("%Y%m%d")
+                candidates = self.db.get_closing_candidates(check_date)
+                if candidates:
+                    target_date = check_date
+                    break
+            
+            if not target_date or not candidates:
+                logger.info("평가할 전일 종가매매 후보 데이터가 없습니다.")
+                return
+
+            logger.info(f"전일({target_date}) 종가매매 후보 {len(candidates)}개 성과 평가 시작")
+
+            # 2. 각 후보별 성과 계산
+            for cand in candidates:
+                try:
+                    ticker = cand['ticker']
+                    
+                    # 일봉 데이터 조회 (전일, 금일 포함)
+                    # 넉넉하게 5일치 조회
+                    daily_data = self.broker.get_historical_daily_data(ticker, days=5)
+                    
+                    if not daily_data or len(daily_data) < 2:
+                        logger.warning(f"{ticker} 데이터 부족으로 평가 스킵")
+                        continue
+                    
+                    # 데이터 정렬 (날짜 오름차순)
+                    # API 응답 구조에 따라 다를 수 있으므로 날짜 확인
+                    # get_historical_daily_data는 보통 최신순(내림차순)일 가능성이 높음 -> 확인 필요
+                    # KIS API는 보통 최신순으로 줌.
+                    
+                    # 날짜 기준 정렬 (과거 -> 최신)
+                    daily_data.sort(key=lambda x: x['stck_bsop_date'])
+                    
+                    # 전일 데이터 찾기 (target_date)
+                    prev_day_data = None
+                    curr_day_data = None
+                    
+                    for i, day in enumerate(daily_data):
+                        if day['stck_bsop_date'] == target_date:
+                            prev_day_data = day
+                            if i + 1 < len(daily_data):
+                                curr_day_data = daily_data[i+1]
+                            break
+                    
+                    if not prev_day_data or not curr_day_data:
+                        logger.warning(f"{ticker}의 전일({target_date}) 또는 금일 데이터가 없습니다.")
+                        continue
+
+                    # 가격 데이터 추출
+                    prev_close = float(prev_day_data['stck_clpr'])
+                    curr_open = float(curr_day_data['stck_oprc'])
+                    curr_close = float(curr_day_data['stck_clpr'])
+                    curr_high = float(curr_day_data['stck_hgpr'])
+                    curr_low = float(curr_day_data['stck_lwpr'])
+                    
+                    prev_vol = float(prev_day_data['acml_vol'])
+                    curr_vol = float(curr_day_data['acml_vol'])
+
+                    # 성과 지표 계산
+                    # 1. 시가 수익률 (Next Open Return)
+                    next_open_return_pct = ((curr_open - prev_close) / prev_close) * 100
+                    
+                    # 2. 종가 수익률 (Next Close Return)
+                    next_close_return_pct = ((curr_close - prev_close) / prev_close) * 100
+                    
+                    # 3. 고가 기준 최대 수익률 (MFE)
+                    next_day_mfe_pct = ((curr_high - prev_close) / prev_close) * 100
+                    
+                    # 4. 저가 기준 최대 손실률 (MAE)
+                    next_day_mae_pct = ((curr_low - prev_close) / prev_close) * 100
+                    
+                    # 5. 거래량 비율
+                    volume_ratio = (curr_vol / prev_vol * 100) if prev_vol > 0 else 0
+
+                    # 3. 결과 저장
+                    result = {
+                        'candidate_id': cand['id'],
+                        'ticker': ticker,
+                        'eval_date': curr_day_data['stck_bsop_date'], # 평가 기준일 (오늘)
+                        'next_open_return_pct': round(next_open_return_pct, 2),
+                        'next_close_return_pct': round(next_close_return_pct, 2),
+                        'next_day_mfe_pct': round(next_day_mfe_pct, 2),
+                        'next_day_mae_pct': round(next_day_mae_pct, 2),
+                        'volume_ratio': round(volume_ratio, 2)
+                    }
+                    
+                    self.db.insert_closing_result(result)
+                    logger.info(f"[{ticker}] 평가 완료: 시가 {next_open_return_pct:.2f}%, 종가 {next_close_return_pct:.2f}%")
+
+                except Exception as e:
+                    logger.error(f"{cand['ticker']} 평가 중 오류: {e}")
+
+        except Exception as e:
+            logger.error(f"종가매매 성과 평가 전체 오류: {e}", exc_info=True)
 
 
 def generate_summaries(run_date: str, candidates: List[Dict], 

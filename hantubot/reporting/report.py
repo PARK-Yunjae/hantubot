@@ -7,6 +7,7 @@ import pandas as pd
 
 from .logger import get_logger
 from .notifier import Notifier
+from .study_db import get_study_db # DB 연동 추가
 
 logger = get_logger(__name__)
 
@@ -106,11 +107,51 @@ class ReportGenerator:
         
         logger.info(f"Daily report saved to {report_file_path}")
 
+        # --- [추가] 전일 후보 성과 요약 (목표 A-3) ---
+        closing_summary_fields = []
+        try:
+            db = get_study_db()
+            # 오늘 평가된 결과 조회 (eval_date = today_str)
+            # closing_candidate_results 테이블에서 조회해야 함
+            with db.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT r.*, c.name 
+                    FROM closing_candidate_results r
+                    JOIN closing_candidates c ON r.candidate_id = c.id
+                    WHERE r.eval_date = ?
+                    ORDER BY c.rank ASC
+                """, (today_str,))
+                results = [dict(row) for row in cursor.fetchall()]
+            
+            if results:
+                summary_text += "\n\n**🐫 전일 종가매매 후보 성과**\n"
+                for res in results:
+                    name = res.get('name', res['ticker'])
+                    open_ret = res.get('next_open_return_pct', 0)
+                    close_ret = res.get('next_close_return_pct', 0)
+                    mfe = res.get('next_day_mfe_pct', 0)
+                    
+                    emoji = "🔴" if close_ret > 0 else "🔵"
+                    summary_text += f"- {name}: 시가 {open_ret:+.2f}% / 종가 {close_ret:+.2f}% (최대 {mfe:+.2f}%)\n"
+                    
+                    closing_summary_fields.append({
+                        "name": f"{emoji} {name}",
+                        "value": f"시가: {open_ret:+.2f}% | 종가: {close_ret:+.2f}%\n최대수익: {mfe:+.2f}%",
+                        "inline": True
+                    })
+            else:
+                summary_text += "\n\n(전일 종가매매 후보 평가 데이터 없음)"
+
+        except Exception as e:
+            logger.error(f"성과 리포트 추가 실패: {e}")
+
         # --- 알림 전송 ---
         discord_embed = {
             "title": f"📈 일일 리포트 ({today_str})",
-            "description": summary_text, # pnl_krw가 포함된 summary_text 사용
+            "description": summary_text, 
             "color": 5814783, # Blue
+            "fields": closing_summary_fields, # 필드 추가
             "footer": {"text": "상세 내용은 저장된 마크다운 리포트를 확인하세요."}
         }
         self.notifier.send_alert(f"일일 리포트가 생성되었습니다.", level='info', embed=discord_embed)

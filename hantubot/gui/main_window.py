@@ -79,7 +79,8 @@ class EngineWorker(QObject):
                 initial_cash = 10_000_000 if is_mock else 0 # Set default cash only if no positions and no cash
 
             portfolio = Portfolio(initial_cash=initial_cash, initial_positions=positions)
-            order_manager = OrderManager(broker=broker, portfolio=portfolio, clock=market_clock, regime_manager=regime_manager)
+            # config 전달
+            order_manager = OrderManager(broker=broker, portfolio=portfolio, clock=market_clock, regime_manager=regime_manager, config=config)
 
             self.engine = TradingEngine(
                 config=config, market_clock=market_clock, broker=broker,

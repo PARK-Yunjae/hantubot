@@ -27,9 +27,38 @@ class BaseStrategy(ABC):
         self.notifier = notifier
         self.dynamic_params: Dict[str, Any] = {} # 동적 파라미터 저장소
         
+        # 전역 설정 로드 (Engine에서 주입)
+        self.global_config = config.get('_global', {})
+        
         self._load_dynamic_params() # 동적 파라미터 로드
         
         logger.info(f"Strategy '{self.name}' (ID: {self.strategy_id}) initialized with config: {self.config}, Dynamic: {self.dynamic_params}")
+
+    def calculate_buy_quantity(self, current_price: float, available_cash: float) -> int:
+        """
+        공통 매수 수량 계산 로직 (Config의 buy_cash_ratio 적용)
+        
+        Args:
+            current_price: 현재가
+            available_cash: 가용 현금
+            
+        Returns:
+            매수 수량 (int)
+        """
+        if current_price <= 0:
+            return 0
+            
+        # 전역 설정에서 비율 가져오기 (기본값 0.93)
+        risk_mgmt = self.global_config.get('risk_management', {})
+        buy_ratio = risk_mgmt.get('buy_cash_ratio', 0.93)
+        
+        # 최대 주문 가능 금액 계산
+        order_amount = available_cash * buy_ratio
+        
+        # 수량 계산 (소수점 버림)
+        quantity = int(order_amount // current_price)
+        
+        return quantity
 
     def _load_dynamic_params(self):
         """

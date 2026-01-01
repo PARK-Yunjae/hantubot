@@ -15,11 +15,12 @@ class OrderManager:
     모든 주문 요청을 중앙에서 처리하고 검증하는 클래스.
     SSOT(Single Source of Truth) 원칙을 강제한다.
     """
-    def __init__(self, broker, portfolio: Portfolio, clock: MarketClock, regime_manager: RegimeManager):
+    def __init__(self, broker, portfolio: Portfolio, clock: MarketClock, regime_manager: RegimeManager, config: dict = None):
         self._broker = broker # The broker instance for placing actual orders
         self._portfolio = portfolio
         self._clock = clock
         self._regime_manager = regime_manager # New attribute
+        self._config = config or {} # 전역 설정
         self._locks: dict[str, threading.Lock] = {}  # 종목별 잠금을 위한 딕셔너리
         # 멱등성 키 저장소 (key: (strategy_id, symbol, side), value: (order_id, timestamp))
         self._idempotency_keys: dict[tuple, tuple] = {} 
@@ -112,7 +113,21 @@ class OrderManager:
             if self._is_duplicate_signal(strategy_id, symbol, side):
                 return
 
-            # 3. 포지션 및 잔고 검증
+            # 3. 정책 검증 (Position Priority)
+            if side == 'buy':
+                policy = self._config.get('policy', {})
+                priority = policy.get('position_priority', 'closing_over_intraday')
+                now = datetime.now()
+                
+                # closing_over_intraday: 14:50 이후 intraday 신규 진입 금지
+                # closing_price 전략은 허용
+                if priority == 'closing_over_intraday':
+                    if now.hour >= 14 and now.minute >= 50:
+                        if 'closing_price' not in strategy_id:
+                            logger.warning(f"[OrderManager] 14:50 이후 Intraday 진입 금지 ({strategy_id}). 종가전략 우선 정책.")
+                            return
+
+            # 4. 포지션 및 잔고 검증
             if side == 'buy':
                 # [전수조사 수정] 중앙에서 "1종목 보유" 규칙 강제 적용
                 if self._portfolio.get_positions():

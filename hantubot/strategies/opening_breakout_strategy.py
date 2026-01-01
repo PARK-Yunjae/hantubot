@@ -181,8 +181,10 @@ class OpeningBreakoutStrategy(BaseStrategy):
                 logger.info(f"[{self.name}] 진입: {symbol}. 갭:{gap:.1f}%, 화력:{current_1m_value/100000000:.1f}억")
                 
                 available_cash = portfolio.get_cash()
-                order_amount = available_cash * 0.90
-                quantity = int(order_amount // current_price)
+                
+                # [변경] 공통 매수 수량 계산 메서드 사용 (Config 비율 적용)
+                quantity = self.calculate_buy_quantity(current_price, available_cash)
+                
                 if quantity == 0: continue
 
                 signals.append({
