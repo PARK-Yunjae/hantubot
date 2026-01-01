@@ -353,9 +353,10 @@ class TradingEngine:
             strategy_id = position.get('strategy_id', '')
             
             # opening_breakout_strategy: 09:29부터 청산 시작 (09:30 종료)
+            # [전략 전환 보호] 09:30부터 시작되는 volume_spike 전략을 위해 자금을 확보하고 포지션을 정리합니다.
             if 'opening_breakout' in strategy_id:
                 if (now.hour == 9 and now.minute >= 29) or now.hour > 9:
-                    logger.warning(f"[우선 청산] {symbol} - opening_breakout 시간 종료 임박 (09:30)")
+                    logger.warning(f"[전략 전환 청산] {symbol} - 09:30 오전 전략 종료 -> 오후 전략 준비를 위해 강제 청산합니다.")
                     sell_signal = {
                         'strategy_id': 'forced_liquidation_0930',
                         'symbol': symbol,
