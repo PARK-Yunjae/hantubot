@@ -34,6 +34,7 @@ class ClosingPriceStrategy(BaseStrategy):
         
         # 플래그 관리
         self.has_bought_today = False
+        self.has_lunch_report_sent = False  # 점심 브리핑 발송 여부
         
         self.top_stocks_today = []
         self._load_screening_results()
@@ -198,11 +199,15 @@ class ClosingPriceStrategy(BaseStrategy):
         # 리셋 (다음날을 위해)
         if now.hour >= 16:
             self.has_bought_today = False
+            self.has_lunch_report_sent = False
             self.top_stocks_today = []
             return signals
         
         # 🍱 [12:30] 점심 브리핑 (Dedup Key 사용)
         if dt.time(12, 30) <= now.time() < dt.time(12, 40):
+            if self.has_lunch_report_sent: return signals
+            self.has_lunch_report_sent = True
+
             dedup_key = f"MIDDAY_SCREENING:{today_str}:1230"
             # Notifier 내부 캐시가 아니라, 여기서 먼저 확인하고 로직을 태우는게 효율적일 수 있으나
             # Notifier에 로직을 위임하려면 일단 계산 후 보내야 함.
