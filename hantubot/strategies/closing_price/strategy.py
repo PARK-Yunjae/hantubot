@@ -3,6 +3,7 @@ import json
 import os
 from typing import Dict, List, Any
 import pandas as pd
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from ...strategies.base_strategy import BaseStrategy
 from ...core.portfolio import Portfolio
@@ -18,67 +19,53 @@ logger = get_logger(__name__)
 
 class ClosingPriceStrategy(BaseStrategy):
     """
-    [ClosingPriceStrategy v4] 2025년 유동성 기준 (1,000억 클럽) 적용
-    
-    1. 후보 수집: 1차 거래대금 필터(300억) 통과 종목 대상
-    2. 점수 계산: 거래대금 + CCI + 등락률 (100점 만점)
-    3. 최종 선발:
-       - 1군: 거래대금 1,000억+, 양봉, 2,000원+ (점수순)
-       - 2군(Plan B): 1군 없을 시 300억+, 양봉 (점수순)
+    [ClosingPriceStrategy v5.1] 유목민 전략 (점심 브리핑 추가)
+    - 12:30 점심 중간 점검 알림 추가 (Plan B 대응)
+    - 15:03 종가 배팅 알림 (기존)
+    - 15:15 자동 매수 (기존)
     """
     
     def __init__(self, strategy_id: str, config: Dict[str, Any], broker: Broker, clock: MarketClock, notifier: Notifier):
         super().__init__(strategy_id, config, broker, clock, notifier)
         
-        # 설정 로드
         self.strategy_config = ClosingPriceConfig.from_dict(self.config)
         self.logic = ClosingPriceLogic(self.strategy_config)
         
-        # 상태 변수
-        self.has_webhook_sent_today = False
+        # 플래그 관리
+        self.has_lunch_alert_sent = False  # 🍱 점심 알림용 플래그
+        self.has_webhook_sent_today = False # ⏰ 종가 알림용 플래그
         self.has_bought_today = False
-        self.top_stocks_today = []
         
-        # 재시작 시 오늘 스크리닝 결과 복구
+        self.top_stocks_today = []
         self._load_screening_results()
 
     def _get_screening_file_path(self):
-        """오늘 날짜의 스크리닝 결과 파일 경로"""
         today_str = dt.datetime.now().strftime("%Y%m%d")
-        if not os.path.exists('data'):
-            os.makedirs('data')
+        if not os.path.exists('data'): os.makedirs('data')
         return os.path.join('data', f'closing_price_targets_{today_str}.json')
 
     def _save_screening_results(self):
-        """스크리닝 결과를 JSON 파일로 저장"""
         try:
             file_path = self._get_screening_file_path()
             with open(file_path, 'w', encoding='utf-8') as f:
                 json.dump(self.top_stocks_today, f, ensure_ascii=False, indent=2)
-            logger.info(f"[{self.name}] 💾 스크리닝 결과 저장 완료: {file_path}")
+            logger.info(f"[{self.name}] 💾 스크리닝 결과 저장 완료")
         except Exception as e:
-            logger.error(f"[{self.name}] 스크리닝 결과 저장 실패: {e}")
+            logger.error(f"[{self.name}] 저장 실패: {e}")
 
     def _load_screening_results(self):
-        """저장된 스크리닝 결과 로드"""
         try:
             file_path = self._get_screening_file_path()
             if os.path.exists(file_path):
                 with open(file_path, 'r', encoding='utf-8') as f:
                     self.top_stocks_today = json.load(f)
-                
                 if self.top_stocks_today:
-                    logger.info(f"[{self.name}] ♻️ 재시작 후 스크리닝 결과 복구 완료 ({len(self.top_stocks_today)}개)")
                     self.has_webhook_sent_today = True 
-            else:
-                pass
-        except Exception as e:
-            logger.error(f"[{self.name}] 스크리닝 결과 로드 실패: {e}")
+        except Exception:
+            pass
 
-    def calculate_score(self, ticker: str, stock_info: Dict[str, Any], data_payload: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        개별 종목 필터링 및 점수 계산 (CCI, 등락률, 거래대금 등)
-        """
+    def calculate_score(self, ticker: str, stock_info: Dict[str, Any], data_payload: Dict[str, Any], market_trend: str) -> Dict[str, Any]:
+        """개별 종목 채점 (시장 지수 반영)"""
         result = {'valid': False, 'symbol': ticker, 'score': 0, 'features': {}, 'reason': ''}
         
         try:
@@ -86,38 +73,41 @@ class ClosingPriceStrategy(BaseStrategy):
             current_price = float(stock_info.get('stck_prpr', 0))
             trading_value = float(stock_info.get('acml_tr_pbmn', 0))
             change_rate = float(stock_info.get('prdy_ctrt', 0))
+            sector_name = stock_info.get('bstp_kor_isnm', 'Unknown')
             
-            # 2. 일봉 데이터 조회 (CCI 및 MA20 계산용)
+            # 🔥 외국인 수급 확인
+            frgn_net_buy = float(stock_info.get('frgn_ntby_qty', 0))
+            is_foreigner_buy = frgn_net_buy > 0
+            
+            # 2. 일봉 데이터 (MA20, CCI)
             hist_data = data_payload['historical_daily'].get(ticker)
             if not hist_data:
                 hist_data = self.broker.get_historical_daily_data(ticker, days=30)
-                if hist_data:
-                    data_payload['historical_daily'][ticker] = hist_data
+                if hist_data: data_payload['historical_daily'][ticker] = hist_data
             
             if not hist_data or len(hist_data) < 20:
                 result['reason'] = "데이터부족"
                 return result
 
             df = pd.DataFrame(hist_data)
-            # 숫자형 변환
             for col in ['stck_clpr', 'stck_hgpr', 'stck_lwpr', 'acml_vol', 'stck_oprc']:
-                if col in df.columns:
-                    df[col] = pd.to_numeric(df[col], errors='coerce')
-            
+                if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce')
             df = df.sort_values(by='stck_bsop_date').reset_index(drop=True)
             
-            # 3. 기본 필터 검증 (MA20, 캔들 등)
+            # 3. 기본 필터
             is_valid, validation_reason = self.logic.is_valid_candidate(df, stock_info)
             if not is_valid:
                 result['reason'] = validation_reason
                 return result
 
-            # 4. 보조지표(CCI) 계산
+            # 4. 점수 계산
             indicators = self.logic.get_indicators(df)
             cci_val = indicators.get('cci', 0.0)
             
-            # 5. 점수 계산
-            score, score_detail = self.logic.calculate_score(current_price, trading_value, change_rate, cci_val)
+            score, score_detail = self.logic.calculate_base_score(
+                current_price, trading_value, change_rate, cci_val, 
+                market_trend, is_foreigner_buy
+            )
             
             result.update({
                 'valid': True,
@@ -126,209 +116,183 @@ class ClosingPriceStrategy(BaseStrategy):
                 'price': int(current_price),
                 'score': score,
                 'trading_value': trading_value,
+                'sector': sector_name,
                 'reason': score_detail,
                 'features': {
                     'cci': float(round(cci_val, 1)),
                     'change_rate': change_rate,
-                    'score_detail': score_detail
+                    'score_detail': score_detail,
+                    'is_foreigner': is_foreigner_buy
                 }
             })
             
         except Exception as e:
-            logger.error(f"[{self.name}] {ticker} 계산 중 오류: {e}")
+            logger.error(f"[{self.name}] {ticker} 오류: {e}")
             result['reason'] = f"에러:{str(e)}"
             
         return result
 
     async def _perform_screening(self, data_payload: Dict[str, Any], top_volume_stocks: List[Dict]) -> List[Dict[str, Any]]:
-        """스크리닝 실행 (후보 수집 -> 랭킹 선정) - 병렬 처리"""
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        
+        """스크리닝 실행 (공통 로직)"""
         candidates = []
-        
-        # 1차 대상: 거래대금 상위 종목 전체 (API에서 이미 정렬되어 옴)
-        # 최소 거래대금 300억 (Plan B 기준) 이상인 종목만 계산 대상으로 삼음 (2025 기준)
         min_trading_value_cutoff = 30_000_000_000 
+        
+        market_trend = self.logic.get_market_trend()
+        logger.info(f"[{self.name}] 시장 추세: {market_trend.upper()}")
 
         targets = []
         for stock_data in top_volume_stocks:
             ticker = stock_data.get('mksc_shrn_iscd')
-            stock_name = stock_data.get('hts_kor_isnm')
-            
-            try:
-                trading_value = float(stock_data.get('acml_tr_pbmn', 0))
-            except (ValueError, TypeError):
-                trading_value = 0
-            
-            if trading_value < min_trading_value_cutoff:
-                continue
+            try: tv = float(stock_data.get('acml_tr_pbmn', 0))
+            except: tv = 0
+            if tv < min_trading_value_cutoff: continue
+            if ticker: targets.append((ticker, stock_data))
 
-            if not ticker or not stock_name:
-                continue
-            
-            targets.append((ticker, stock_name, stock_data))
-
-        # [Step 1] 점수 계산 및 필터링 (병렬 처리)
         with ThreadPoolExecutor(max_workers=10) as executor:
             future_to_info = {
-                executor.submit(self.calculate_score, ticker, stock_info, data_payload): (ticker, stock_name)
-                for ticker, stock_name, stock_info in targets
+                executor.submit(self.calculate_score, ticker, stock_info, data_payload, market_trend): ticker
+                for ticker, stock_info in targets
             }
-            
             for future in as_completed(future_to_info):
                 try:
-                    result = future.result()
-                    if result.get('valid'):
-                        candidates.append(result)
-                except Exception as e:
-                    logger.error(f"[{self.name}] 채점 중 에러: {e}")
+                    res = future.result()
+                    if res.get('valid'): candidates.append(res)
+                except Exception: pass
 
-        # [Step 2] 필터링 및 랭킹 (1군 -> 2군)
         selected_stocks, selection_type = self.logic.filter_and_rank(candidates)
-        
-        # 선택된 종목에 선정 유형 정보 추가
         for stock in selected_stocks:
             stock['selection_type'] = selection_type
             
         return selected_stocks
 
     async def generate_signal(self, data_payload: Dict[str, Any], portfolio: Portfolio) -> List[Dict[str, Any]]:
-        signals: List[Dict[str, Any]] = []
+        signals = []
         now = dt.datetime.now()
         
-        # 16시 이후 플래그 리셋
+        # 리셋 (다음날을 위해)
         if now.hour >= 16:
             self.has_webhook_sent_today = False
+            self.has_lunch_alert_sent = False
             self.has_bought_today = False
             self.top_stocks_today = []
             return signals
         
-        # ========================================
-        # 15:03-15:15: 스크리닝 + 웹훅 발송 (매수 X)
-        # ========================================
+        # 🍱 [추가됨] 12:30 점심 브리핑 (Plan B)
+        # 12시 30분 ~ 12시 40분 사이에 한 번 실행
+        if dt.time(12, 30) <= now.time() < dt.time(12, 40) and not self.has_lunch_alert_sent:
+            logger.info(f"[{self.name}] ===== 🍱 12:30 점심 중간 점검 시작 =====")
+            self.has_lunch_alert_sent = True # 중복 실행 방지
+            
+            try:
+                top_volume_stocks_raw = self.broker.get_realtime_transaction_ranks(top_n=100)
+                if top_volume_stocks_raw:
+                    top_volume_stocks = [item for item in top_volume_stocks_raw if is_eligible_stock(item.get('hts_kor_isnm', ''))]
+                    lunch_stocks = await self._perform_screening(data_payload, top_volume_stocks)
+                    
+                    if lunch_stocks:
+                        # 점심용 웹훅 발송 (Top 3)
+                        fields = []
+                        for i, stock in enumerate(lunch_stocks):
+                            rank_emoji = '🍱' 
+                            tv_billion = stock['trading_value'] / 100_000_000
+                            sector = stock.get('sector', '-')
+                            fields.append({
+                                "name": f"{i+1}위: {stock['name']} ({stock['ticker']})",
+                                "value": f"**{stock['score']}점** | {stock['reason']}\n🏢 {sector} | 💰 {tv_billion:,.0f}억",
+                                "inline": False
+                            })
+                        
+                        embed = {
+                            "title": f"🍱 점심 중간 점검 (12:30)",
+                            "description": "**[Plan B] 오후장 매수 참고용**\n현재 시점 1,000억 클럽/주도주 현황입니다.",
+                            "color": 16776960, # 노란색
+                            "fields": fields
+                        }
+                        self.notifier.send_alert("점심 브리핑", embed=embed)
+                    else:
+                        self.notifier.send_alert("🍱 점심 점검: 조건 만족 종목 없음", level='info')
+            except Exception as e:
+                logger.error(f"점심 스크리닝 오류: {e}")
+
+        # ⏰ 15:03 종가 스크리닝 (기존 로직)
         if self.strategy_config.webhook_time <= now.time() < self.strategy_config.buy_start_time and not self.has_webhook_sent_today:
-            logger.info(f"[{self.name}] ===== 15:03 유목민 스타일 스크리닝 실행 =====")
+            logger.info(f"[{self.name}] ===== 15:03 종가 배팅 스크리닝 =====")
             self.has_webhook_sent_today = True
             
             try:
-                # KIS API로 거래대금 상위 종목 조회 (충분히 많이 가져옴)
                 top_volume_stocks_raw = self.broker.get_realtime_transaction_ranks(top_n=100)
-                if not top_volume_stocks_raw:
-                    logger.warning(f"[{self.name}] 거래대금 상위 종목 조회 실패")
-                    return signals
+                if not top_volume_stocks_raw: return signals
                 
-                # ETF, 스팩 필터링
-                top_volume_stocks = [
-                    item for item in top_volume_stocks_raw
-                    if is_eligible_stock(item.get('hts_kor_isnm', ''))
-                ]
-                logger.info(f"[{self.name}] 적격 종목 {len(top_volume_stocks)}개 발견 (필터링 전)")
+                top_volume_stocks = [item for item in top_volume_stocks_raw if is_eligible_stock(item.get('hts_kor_isnm', ''))]
                 
-                # 스크리닝 실행
                 screened_stocks = await self._perform_screening(data_payload, top_volume_stocks)
                 
                 if not screened_stocks:
-                    msg = "🚫 [2025 유목민 전략] 조건에 맞는 종목이 없습니다.\n(Plan B 최소 거래대금 300억 미달)"
-                    logger.info(msg)
+                    msg = "🚫 [유목민 전략] 조건 만족 종목 없음"
                     self.notifier.send_alert(msg, level='info')
                     return signals
                 
-                # [Step 3] 최종 선발
-                self.top_stocks_today = screened_stocks # 이미 filter_and_rank에서 Top 3 반환
+                self.top_stocks_today = screened_stocks
                 selection_type = self.top_stocks_today[0].get('selection_type', '알수없음')
-                
-                # 💾 결과 파일 저장
                 self._save_screening_results()
 
-                # Discord 웹훅 발송
+                # 웹훅 발송
                 fields = []
                 for i, stock in enumerate(self.top_stocks_today):
                     rank_emoji = '🥇' if i==0 else '🥈' if i==1 else '🥉'
-                    trading_val_billion = stock['trading_value'] / 100_000_000
-                    change_rate = stock['features']['change_rate']
-                    cci_val = stock['features']['cci']
-                    score = stock['score']
+                    tv_billion = stock['trading_value'] / 100_000_000
+                    sector = stock.get('sector', '-')
                     
                     fields.append({
                         "name": f"{rank_emoji} {i+1}위: {stock['name']} ({stock['ticker']})",
                         "value": (
-                            f"**점수: {score}점** ({stock['reason']})\n"
-                            f"💰 대금: {trading_val_billion:,.0f}억\n"
-                            f"📈 등락: {change_rate:+.2f}% | CCI: {cci_val:.1f}\n"
+                            f"**점수: {stock['score']}점**\n"
+                            f"└ {stock['reason']}\n"
+                            f"🏢 업종: {sector} | 💰 {tv_billion:,.0f}억\n"
                             f"💵 현재가: {stock['price']:,.0f}원"
                         ),
                         "inline": False
                     })
                 
                 embed = {
-                    "title": f"🐫 유목민 1,000억 클럽 TOP3 (15:03)",
-                    "description": (
-                        f"**선정 유형: {selection_type}**\n"
-                        f"1군: 대금 1,000억/양봉/2,000원\n"
-                        f"2군: 대금 300억/양봉 (Plan B)\n"
-                        f"⏰ 15:15에 1위 종목 매수 예정"
-                    ),
-                    "color": 16705372,  # 금색
-                    "fields": fields,
-                    "footer": {"text": "자동 매수 활성화 시 1위 종목 매수"}
+                    "title": f"🐫 유목민 1,000억 클럽 TOP3",
+                    "description": f"**유형: {selection_type}**\n시장추세 반영 완료\n⏰ 15:15 1위 매수 예정",
+                    "color": 16705372,
+                    "fields": fields
                 }
                 self.notifier.send_alert("종가매매 후보 알림", embed=embed)
-                logger.info(f"[{self.name}] 웹훅 발송 완료. 선정 유형: {selection_type}")
                 
             except Exception as e:
-                logger.error(f"[{self.name}] 스크리닝 중 오류: {e}", exc_info=True)
-            
+                logger.error(f"스크리닝 오류: {e}", exc_info=True)
             return signals
         
-        # ========================================
-        # 15:15-15:19: 저장된 1위 종목 매수
-        # ========================================
+        # 15:15 매수 (기존과 동일)
         if self.strategy_config.buy_start_time <= now.time() <= self.strategy_config.buy_end_time and not self.has_bought_today:
-            if not self.top_stocks_today:
-                logger.warning(f"[{self.name}] 선정된 종목이 없어 매수를 건너뜁니다.")
+            # 사용자가 점심에 미리 샀을 수 있으므로 잔고 체크
+            if portfolio.get_positions(): 
+                self.has_bought_today = True # 이미 보유 중이면 패스
                 return signals
+
+            if not self.top_stocks_today or not self.strategy_config.auto_buy_enabled: return signals
             
-            if not self.strategy_config.auto_buy_enabled:
-                logger.info(f"[{self.name}] 자동 매수 비활성화. 매수 건너뜀")
-                return signals
-            
-            if portfolio.get_positions():
-                logger.info(f"[{self.name}] 이미 보유 중인 종목이 있어 매수 건너뜀")
-                self.has_bought_today = True
-                return signals
-            
-            logger.info(f"[{self.name}] ===== 15:15 매수 실행 =====")
             self.has_bought_today = True
-            
             top_stock = self.top_stocks_today[0]
-            logger.info(f"[{self.name}] 🎯 1위 종목 매수 시도: {top_stock['name']} ({top_stock['ticker']})")
             
-            current_price = self.broker.get_current_price(top_stock['ticker'])
-            if current_price <= 0:
-                current_price = top_stock['price']
+            avail_cash = portfolio.get_cash()
+            price = self.broker.get_current_price(top_stock['ticker']) or top_stock['price']
+            qty = int((avail_cash * 0.98) // price)
             
-            available_cash = portfolio.get_cash()
-            order_amount = available_cash * 0.98
-            quantity = int(order_amount // current_price)
-            
-            if quantity == 0:
-                logger.warning(f"[{self.name}] 현금 부족으로 매수 불가 ({available_cash:,.0f}원)")
-                return signals
-            
-            signals.append({
-                'strategy_id': self.strategy_id,
-                'symbol': top_stock['ticker'],
-                'side': 'buy',
-                'quantity': quantity,
-                'price': 0,
-                'order_type': 'market',
-                'features': {
-                    'score': top_stock['score'],
-                    'selection_type': top_stock.get('selection_type', 'unknown')
-                }
-            })
-            logger.info(f"[{self.name}] 매수 신호 생성 완료 ({quantity}주)")
-            
+            if qty > 0:
+                signals.append({
+                    'strategy_id': self.strategy_id,
+                    'symbol': top_stock['ticker'],
+                    'side': 'buy',
+                    'quantity': qty,
+                    'price': 0,
+                    'order_type': 'market',
+                    'features': {'score': top_stock['score']}
+                })
+                logger.info(f"[{self.name}] 🎯 매수 신호: {top_stock['name']} {qty}주")
             return signals
             
         return signals
