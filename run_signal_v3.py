@@ -6,6 +6,10 @@ import pytz
 import pandas as pd
 import requests
 from pykrx import stock
+from dotenv import load_dotenv
+
+# Load environment variables (override=True ensures .env file takes precedence if env vars are empty/set)
+load_dotenv(override=True)
 
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))

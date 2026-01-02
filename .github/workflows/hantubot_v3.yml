@@ -21,6 +21,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # for pushing commits
+    env:
+      KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+      KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+      KIS_ACCOUNT_NO: ${{ secrets.KIS_ACCOUNT_NO }}
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
     
     steps:
     - name: Checkout
@@ -35,13 +40,17 @@ jobs:
       run: |
         pip install -r requirements_v3.txt
 
+    - name: Create .env from Secret (Optional)
+      env:
+        ENV_FILE_CONTENT: ${{ secrets.ENV_FILE }}
+      run: |
+        if [ -n "$ENV_FILE_CONTENT" ]; then
+          echo "$ENV_FILE_CONTENT" > .env
+          echo "Created .env from ENV_FILE secret"
+        fi
+
     - name: Run Signal (15:03)
       if: github.event.schedule == '50 5 * * 1-5' || github.event.schedule == '40 12 * * *' || (github.event_name == 'workflow_dispatch' && inputs.job_type == 'signal')
-      env:
-        KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
-        KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
-        KIS_ACCOUNT_NO: ${{ secrets.KIS_ACCOUNT_NO }}
-        DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
       run: |
         echo "Starting Signal Run..."
         python run_signal_v3.py
