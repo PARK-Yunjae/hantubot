@@ -1,0 +1,9 @@
+pykrx
+pandas
+requests
+pytz
+streamlit
+mojito-python
+pyyaml
+python-dotenv
+ta

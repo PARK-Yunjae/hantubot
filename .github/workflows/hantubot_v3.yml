@@ -1,0 +1,60 @@
+name: Hantubot V3 Serverless Nomad
+
+on:
+  schedule:
+    - cron: '50 5 * * 1-5' # 14:50 KST (Run Signal)
+    - cron: '0 7 * * 1-5'  # 16:00 KST (Run Study)
+    - cron: '40 12 * * *'  # [TEST] 21:40 KST (Run All)
+  workflow_dispatch:
+    inputs:
+      job_type:
+        description: 'Job Type'
+        required: true
+        default: 'study'
+        type: choice
+        options:
+        - signal
+        - study
+
+jobs:
+  run-nomad:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # for pushing commits
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Install Dependencies
+      run: |
+        pip install -r requirements_v3.txt
+
+    - name: Run Signal (15:03)
+      if: github.event.schedule == '50 5 * * 1-5' || github.event.schedule == '40 12 * * *' || (github.event_name == 'workflow_dispatch' && inputs.job_type == 'signal')
+      env:
+        KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+        KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+        KIS_ACCOUNT_NO: ${{ secrets.KIS_ACCOUNT_NO }}
+        DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      run: |
+        echo "Starting Signal Run..."
+        python run_signal_v3.py
+
+    - name: Run Study (16:00)
+      if: github.event.schedule == '0 7 * * 1-5' || github.event.schedule == '40 12 * * *' || (github.event_name == 'workflow_dispatch' && inputs.job_type == 'study')
+      run: |
+        echo "Starting Study Run..."
+        python run_study_v3.py
+
+    - name: Commit and Push Report
+      if: github.event.schedule == '0 7 * * 1-5' || github.event.schedule == '40 12 * * *' || (github.event_name == 'workflow_dispatch' && inputs.job_type == 'study')
+      uses: stefanzweifel/git-auto-commit-action@v4
+      with:
+        commit_message: "📊 Update Daily Report"
+        file_pattern: "data/*.json"
