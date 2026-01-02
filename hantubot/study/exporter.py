@@ -8,45 +8,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
 
-import gspread
-import pandas as pd
-from google.oauth2.service_account import Credentials
-from gspread_dataframe import set_with_dataframe
-
 from hantubot.reporting.logger import get_logger
 from hantubot.study.repository import StudyDatabase
 from hantubot.utils.config_loader import load_config_with_env
 
 logger = get_logger(__name__)
-
-# --- Google Sheets Configuration ---
-GSHEET_SCOPE = [
-    'https://www.googleapis.com/auth/spreadsheets',
-    'https://www.googleapis.com/auth/drive'
-]
-# configs/google_service_account.json 경로 계산
-PROJECT_ROOT = Path(__file__).parent.parent.parent
-GSHEET_CONFIG_PATH = PROJECT_ROOT / 'configs' / 'google_service_account.json'
-
-
-def get_gsheet_client():
-    """Authenticate with Google and return the gspread client."""
-    if not GSHEET_CONFIG_PATH.exists():
-        # 파일이 없으면 에러보다는 None 반환하여 부드럽게 처리할 수도 있지만,
-        # 호출부에서 예외처리를 하고 있으므로 여기서는 에러를 내거나 로그를 남김
-        raise FileNotFoundError(f"Google Service Account key not found at {GSHEET_CONFIG_PATH}")
-    
-    creds = Credentials.from_service_account_file(str(GSHEET_CONFIG_PATH), scopes=GSHEET_SCOPE)
-    return gspread.authorize(creds)
-
-
-def get_worksheet_or_create(spreadsheet: gspread.Spreadsheet, name: str):
-    """Get a worksheet by name, or create it if it doesn't exist."""
-    try:
-        return spreadsheet.worksheet(name)
-    except gspread.WorksheetNotFound:
-        logger.info(f"Worksheet '{name}' not found, creating it.")
-        return spreadsheet.add_worksheet(title=name, rows=1, cols=1)
 
 
 def backup_database():
@@ -108,6 +74,10 @@ def backup_database():
 def backup_to_gsheet(run_date: str, db: StudyDatabase, notifier):
     """Google Sheets 백업 (옵션)"""
     try:
+        from hantubot.reporting.study_legacy import get_gsheet_client, get_worksheet_or_create
+        from gspread_dataframe import set_with_dataframe
+        import pandas as pd
+        
         # 데이터 조회
         data = db.get_full_study_data(run_date)
         candidates = data['candidates']
@@ -151,8 +121,7 @@ def backup_to_gsheet(run_date: str, db: StudyDatabase, notifier):
         logger.info(f"Backed up {len(records)} records to Google Sheets")
     
     except Exception as e:
-        # GSheet 설정이 없거나 실패해도 전체 프로세스는 멈추지 않도록 함
-        logger.warning(f"GSheet backup failed (Skipping): {e}")
+        raise Exception(f"GSheet backup failed: {e}")
 
 
 def auto_commit_to_github(run_date: str, stats: Dict):

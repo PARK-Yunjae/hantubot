@@ -1,0 +1,56 @@
+[
+  {
+    "valid": true,
+    "symbol": "319400",
+    "score": 100,
+    "features": {
+      "cci": 133.2,
+      "change_rate": 24.8,
+      "score_detail": "대금(50)+CCI(30)+등락(20)",
+      "is_foreigner": false
+    },
+    "reason": "대금(50)+CCI(30)+등락(20)",
+    "name": "현대무벡스",
+    "ticker": "319400",
+    "price": 23450,
+    "trading_value": 379359597460.0,
+    "sector": "Unknown",
+    "selection_type": "1군(메이저)"
+  },
+  {
+    "valid": true,
+    "symbol": "005930",
+    "score": 95,
+    "features": {
+      "cci": 190.6,
+      "change_rate": 6.88,
+      "score_detail": "대금(50)+CCI(30)+등락(15)",
+      "is_foreigner": false
+    },
+    "reason": "대금(50)+CCI(30)+등락(15)",
+    "name": "삼성전자",
+    "ticker": "005930",
+    "price": 128150,
+    "trading_value": 3240431811600.0,
+    "sector": "Unknown",
+    "selection_type": "1군(메이저)"
+  },
+  {
+    "valid": true,
+    "symbol": "090710",
+    "score": 95,
+    "features": {
+      "cci": 190.1,
+      "change_rate": 10.54,
+      "score_detail": "대금(50)+CCI(30)+등락(15)",
+      "is_foreigner": false
+    },
+    "reason": "대금(50)+CCI(30)+등락(15)",
+    "name": "휴림로봇",
+    "ticker": "090710",
+    "price": 8235,
+    "trading_value": 303793490355.0,
+    "sector": "Unknown",
+    "selection_type": "1군(메이저)"
+  }
+]

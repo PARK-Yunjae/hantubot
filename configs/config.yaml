@@ -123,11 +123,11 @@ regime_settings:
 # 전략별 상세 설정
 strategy_settings:
   closing_price_advanced_screener:
-    # true로 설정하면, 스크리닝 된 1위 종목을 자동으로 매수합니다.
-    # false로 설정하면, Discord 알림만 보내겠습니다.
+    # true로 설정하면, 스크리닝된 1위 종목을 자동으로 매수합니다.
+    # false로 설정하면, Discord 알림만 보냅니다.
     auto_buy_enabled: true
-    # [설명] 매수 수량은 risk_management.buy_cash_ratio (93%) 설정에 따라 가용 현금 기준으로 자동 계산됩니다.
-    # buy_quantity 설정은 더 이상 사용되지 않습니다.
+    # 자동 매수 시 주문할 수량
+    buy_quantity: 1
     # 지원하는 실행 모드 ('live': 실전, 'mock': 모의)
     supported_modes: ['mock', 'live']
 
