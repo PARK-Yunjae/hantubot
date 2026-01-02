@@ -308,12 +308,16 @@ class ClosingPriceStrategy(BaseStrategy):
                                 sector = stock.get('sector', '-')
                                 grade = stock.get('grade', '')
                                 
+                                # 매도 가이드 가져오기
+                                sell_guide = self.logic.get_sell_guide(grade)
+                                
                                 fields.append({
                                     "name": f"{rank_emoji} {i+1}위: {stock['name']} ({stock['ticker']})",
                                     "value": (
                                         f"**{stock['score']}점 ({grade})**\n"
                                         f"└ {stock['reason']}\n"
-                                        f"🏢 {sector} | 💰 {tv_billion:,.0f}억 | 💵 {stock['price']:,.0f}원"
+                                        f"🏢 {sector} | 💰 {tv_billion:,.0f}억 | 💵 {stock['price']:,.0f}원\n\n"
+                                        f"{sell_guide}"
                                     ),
                                     "inline": False
                                 })

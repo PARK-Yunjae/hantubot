@@ -20,6 +20,14 @@ dist/
 *.egg-info
 venv/
 .venv/
-# Data files
-*.xlsx
 
+# Data files (Exclude large datasets and DBs)
+*.xlsx
+*.csv
+*.db
+*.sqlite3
+data/
+project/data/
+
+# Specific data files to keep (if any, use ! to negate)
+# !data/initial_config.json

@@ -223,6 +223,31 @@ class ClosingPriceLogic:
     def get_indicators(self, df: pd.DataFrame) -> Dict[str, float]:
         return {'cci': self._calculate_cci(df)}
 
+    def get_sell_guide(self, grade: str) -> str:
+        """등급별 매도 가이드 멘트 반환"""
+        if "S-Class" in grade:
+            return (
+                "🏆 **[S-Class: 추세 추종형]**\n"
+                "> *\"강한 놈은 길게 먹는다\"*\n"
+                "👉 **시초가 30% 매도**\n"
+                "👉 나머지 70%: 고점 대비 **-3%** 하락 시 익절 (손절 -3%, 목표 +6%)"
+            )
+        elif "A-Class" in grade:
+            return (
+                "⚖️ **[A-Class: 밸런스형]**\n"
+                "> *\"반은 챙기고 반은 본다\"*\n"
+                "👉 **시초가 50% 매도**\n"
+                "👉 나머지 50%: 고점 대비 **-2%** 하락 시 익절 (손절 -2%, 목표 +3%)"
+            )
+        elif "B-Class" in grade:
+            return (
+                "🛡️ **[B-Class: 방어형]**\n"
+                "> *\"줄 때 먹고 튄다\"*\n"
+                "👉 **시초가 100% 전량 매도** (미련 없이 수익 실현)"
+            )
+        else:
+            return "❓ 등급 없음: 상황에 따라 대응하세요."
+
     def filter_and_rank(self, candidates: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], str]:
         """
         최종 랭킹 및 섹터 보너스 적용
@@ -248,7 +273,7 @@ class ClosingPriceLogic:
                 else:
                     c['reason'] = "주도섹터(+10)"
         
-        # [Step 2] 등급 분류
+        # [Step 2] 등급 분류 (S:90, A:80, B:70)
         final_list = []
         for c in candidates:
             score = c.get('score', 0)
@@ -259,7 +284,10 @@ class ClosingPriceLogic:
             elif score >= 80:
                 c['grade'] = "A-Class"
                 final_list.append(c)
-            # < 80 Discard
+            elif score >= 70:
+                c['grade'] = "B-Class"
+                final_list.append(c)
+            # < 70 Discard
         
         final_list.sort(key=lambda x: x['score'], reverse=True)
         
