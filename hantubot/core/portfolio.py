@@ -148,33 +148,3 @@ class Portfolio:
             logger.info(f"Order cancelled: {cancelled_order}")
         else:
             logger.warning(f"Attempted to cancel a non-existent or already filled order ID: {order_id}")
-
-if __name__ == '__main__':
-    # Test the Portfolio class
-    portfolio = Portfolio(initial_cash=10_000_000)
-
-    # 1. Buy Samsung Electronics
-    buy_order_1 = {'order_id': 'samsung_buy_01', 'symbol': '005930', 'side': 'buy', 'quantity': 10, 'price': 75000, 'status': 'open'}
-    portfolio.update_on_new_order(buy_order_1)
-    
-    # 2. Fill the order
-    buy_fill_1 = {'order_id': 'samsung_buy_01', 'symbol': '005930', 'side': 'buy', 'filled_quantity': 10, 'fill_price': 74900}
-    portfolio.update_on_fill(buy_fill_1)
-    print(f"Positions after buy: {portfolio.get_positions()}")
-    print(f"Cash after buy: {portfolio.get_cash():,.0f}")
-
-    # 3. Buy SK Hynix
-    buy_order_2 = {'order_id': 'hynix_buy_01', 'symbol': '000660', 'side': 'buy', 'quantity': 5, 'price': 130000, 'status': 'open'}
-    portfolio.update_on_new_order(buy_order_2)
-    buy_fill_2 = {'order_id': 'hynix_buy_01', 'symbol': '000660', 'side': 'buy', 'filled_quantity': 5, 'fill_price': 129500}
-    portfolio.update_on_fill(buy_fill_2)
-    print(f"Positions after 2nd buy: {portfolio.get_positions()}")
-    print(f"Cash after 2nd buy: {portfolio.get_cash():,.0f}")
-
-    # 4. Sell Samsung Electronics
-    sell_order_1 = {'order_id': 'samsung_sell_01', 'symbol': '005930', 'side': 'sell', 'quantity': 5, 'price': 76000, 'status': 'open'}
-    portfolio.update_on_new_order(sell_order_1)
-    sell_fill_1 = {'order_id': 'samsung_sell_01', 'symbol': '005930', 'side': 'sell', 'filled_quantity': 5, 'fill_price': 76100}
-    portfolio.update_on_fill(sell_fill_1)
-    print(f"Positions after sell: {portfolio.get_positions()}")
-    print(f"Cash after sell: {portfolio.get_cash():,.0f}")

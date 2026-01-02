@@ -115,6 +115,11 @@ def get_logger(name="hantubot") -> logging.Logger:
             except Exception as e:
                 _hantubot_logger_instance.warning(f"⚠️ EmailHandler 추가 실패: {e}")
     
+    # [Hotfix] pykrx 내부 로깅 버그 방지 (TypeError)
+    # pykrx가 로깅 호출 시 인자를 잘못 전달하여 발생하는 TypeError를 방지하기 위해
+    # pykrx의 로그 레벨을 WARNING으로 상향 조정하여 INFO 로그를 무시합니다.
+    logging.getLogger("pykrx").setLevel(logging.WARNING)
+
     # Return a named logger that inherits settings from the root logger
     return logging.getLogger(name)
 

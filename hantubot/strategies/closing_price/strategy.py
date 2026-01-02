@@ -1,8 +1,10 @@
 import datetime as dt
 import json
 import os
+import time
 from typing import Dict, List, Any
 import pandas as pd
+from pykrx import stock
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from ...strategies.base_strategy import BaseStrategy
@@ -20,7 +22,7 @@ logger = get_logger(__name__)
 
 class ClosingPriceStrategy(BaseStrategy):
     """
-    [ClosingPriceStrategy v5.2] 유목민 전략 (데이터화 및 고도화)
+    [ClosingPriceStrategy v6] Nomad Score V3 Implementation
     - 12:30 점심 중간 점검 알림 (Dedup 적용)
     - 15:03 종가 배팅 알림 (DB 저장 및 Dedup 적용)
     - 15:15 자동 매수 (Config 매수 비율 적용)
@@ -90,28 +92,45 @@ class ClosingPriceStrategy(BaseStrategy):
         except Exception:
             pass
 
+    def _get_stock_status_kis(self, ticker: str) -> Dict[str, Any]:
+        """KIS API를 통해 종목 상태(관리종목 등) 및 상세 정보 조회"""
+        try:
+            # Broker -> KisApi 접근
+            if hasattr(self.broker, 'api'):
+                url_path = "/uapi/domestic-stock/v1/quotations/inquire-price"
+                tr_id = "FHKST01010100"
+                params = {
+                    "FID_COND_MRKT_DIV_CODE": "J",
+                    "FID_INPUT_ISCD": ticker
+                }
+                data = self.broker.api.request("GET", url_path, tr_id, params=params)
+                if str(data.get('rt_cd')) == '0':
+                    return data.get('output', {})
+        except Exception:
+            pass
+        return {}
+
     def calculate_score(self, ticker: str, stock_info: Dict[str, Any], data_payload: Dict[str, Any], market_trend: str) -> Dict[str, Any]:
-        """개별 종목 채점 (시장 지수 반영)"""
+        """개별 종목 채점 (Nomad V3)"""
         result = {'valid': False, 'symbol': ticker, 'score': 0, 'features': {}, 'reason': ''}
         
         try:
-            # 1. API 데이터 추출
+            today_str = dt.datetime.now().strftime("%Y%m%d")
+            
+            # 1. Broker Data (Basic)
+            # stock_info comes from get_realtime_transaction_ranks (FHPST01710000)
+            # It has 'acml_tr_pbmn' (Trading Value), 'stck_prpr' (Price), etc.
             current_price = float(stock_info.get('stck_prpr', 0))
             trading_value = float(stock_info.get('acml_tr_pbmn', 0))
             change_rate = float(stock_info.get('prdy_ctrt', 0))
-            sector_name = stock_info.get('bstp_kor_isnm', 'Unknown')
             
-            # 🔥 외국인 수급 확인
-            frgn_net_buy = float(stock_info.get('frgn_ntby_qty', 0))
-            is_foreigner_buy = frgn_net_buy > 0
-            
-            # 2. 일봉 데이터 (MA20, CCI)
+            # 2. Historical Data (MA, CCI, 52w)
             hist_data = data_payload['historical_daily'].get(ticker)
             if not hist_data:
-                hist_data = self.broker.get_historical_daily_data(ticker, days=30)
+                hist_data = self.broker.get_historical_daily_data(ticker, days=250) # Need 1 year for 52w high
                 if hist_data: data_payload['historical_daily'][ticker] = hist_data
             
-            if not hist_data or len(hist_data) < 20:
+            if not hist_data or len(hist_data) < 60:
                 result['reason'] = "데이터부족"
                 return result
 
@@ -120,20 +139,47 @@ class ClosingPriceStrategy(BaseStrategy):
                 if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce')
             df = df.sort_values(by='stck_bsop_date').reset_index(drop=True)
             
-            # 3. 기본 필터
+            # 3. Enhance Data (Fetch details if needed)
+            # Admin Status (KIS) & Sector
+            kis_detail = self._get_stock_status_kis(ticker)
+            if kis_detail:
+                stock_info['iscd_stat_cls_code'] = kis_detail.get('iscd_stat_cls_code', '')
+                stock_info['bstp_kor_isnm'] = kis_detail.get('bstp_kor_isnm', stock_info.get('bstp_kor_isnm', 'Unknown'))
+            
+            # Foreigner Net Buy (Pykrx)
+            # Try Pykrx if not in stock_info (FHPST01710000 likely doesn't have it)
+            # Note: Frequent pykrx calls can be slow.
+            if 'frgn_ntby_qty' not in stock_info or float(stock_info.get('frgn_ntby_qty', 0)) == 0:
+                try:
+                    inv_df = stock.get_market_investor_net_turnover_by_ticker(today_str, today_str, ticker)
+                    if not inv_df.empty and '외국인' in inv_df.columns:
+                        stock_info['frgn_ntby_qty'] = inv_df['외국인'].sum()
+                except Exception:
+                    pass
+            
+            # Shares Outstanding (Pykrx)
+            # Needed for Turnover Ratio
+            try:
+                cap_df = stock.get_market_cap_by_date(today_str, today_str, ticker)
+                if not cap_df.empty:
+                    stock_info['lstn_stcn'] = cap_df.iloc[-1]['상장주식수']
+            except Exception:
+                pass
+
+            # 4. Filter Check (Nomad V3 Hard Filters)
             is_valid, validation_reason = self.logic.is_valid_candidate(df, stock_info)
             if not is_valid:
                 result['reason'] = validation_reason
                 return result
 
-            # 4. 점수 계산
-            indicators = self.logic.get_indicators(df)
-            cci_val = indicators.get('cci', 0.0)
+            # 5. Score Calculation (Nomad V3)
+            score, score_detail, features = self.logic.calculate_nomad_score_v3(df, stock_info, market_trend)
             
-            score, score_detail = self.logic.calculate_base_score(
-                current_price, trading_value, change_rate, cci_val, 
-                market_trend, is_foreigner_buy
-            )
+            # Additional feature storage
+            features['change_rate'] = change_rate
+            features['score_detail'] = score_detail
+            
+            sector_name = stock_info.get('bstp_kor_isnm', 'Unknown')
             
             result.update({
                 'valid': True,
@@ -144,12 +190,7 @@ class ClosingPriceStrategy(BaseStrategy):
                 'trading_value': trading_value,
                 'sector': sector_name,
                 'reason': score_detail,
-                'features': {
-                    'cci': float(round(cci_val, 1)),
-                    'change_rate': change_rate,
-                    'score_detail': score_detail,
-                    'is_foreigner': is_foreigner_buy
-                }
+                'features': features
             })
             
         except Exception as e:
@@ -161,7 +202,7 @@ class ClosingPriceStrategy(BaseStrategy):
     async def _perform_screening(self, data_payload: Dict[str, Any], top_volume_stocks: List[Dict]) -> List[Dict[str, Any]]:
         """스크리닝 실행 (공통 로직)"""
         candidates = []
-        min_trading_value_cutoff = 30_000_000_000 
+        min_trading_value_cutoff = 100_000_000_000 # 1000억 (사전 필터링)
         
         market_trend = self.logic.get_market_trend()
         logger.info(f"[{self.name}] 시장 추세: {market_trend.upper()}")
@@ -171,10 +212,14 @@ class ClosingPriceStrategy(BaseStrategy):
             ticker = stock_data.get('mksc_shrn_iscd')
             try: tv = float(stock_data.get('acml_tr_pbmn', 0))
             except: tv = 0
+            
+            # 1,000억 미만은 스코어링조차 할 필요 없음 (최적화)
             if tv < min_trading_value_cutoff: continue
+            
             if ticker: targets.append((ticker, stock_data))
 
-        with ThreadPoolExecutor(max_workers=10) as executor:
+        # ThreadPoolExecutor로 병렬 스코어링
+        with ThreadPoolExecutor(max_workers=5) as executor: # pykrx 호출 빈도 고려하여 워커 줄임
             future_to_info = {
                 executor.submit(self.calculate_score, ticker, stock_info, data_payload, market_trend): ticker
                 for ticker, stock_info in targets
@@ -185,6 +230,7 @@ class ClosingPriceStrategy(BaseStrategy):
                     if res.get('valid'): candidates.append(res)
                 except Exception: pass
 
+        # 최종 랭킹 및 등급 산정 (섹터 보너스 포함)
         selected_stocks, selection_type = self.logic.filter_and_rank(candidates)
         for stock in selected_stocks:
             stock['selection_type'] = selection_type
@@ -203,19 +249,12 @@ class ClosingPriceStrategy(BaseStrategy):
             self.top_stocks_today = []
             return signals
         
-        # 🍱 [12:30] 점심 브리핑 (Dedup Key 사용)
+        # 🍱 [12:30] 점심 브리핑 (Nomad V3 적용)
         if dt.time(12, 30) <= now.time() < dt.time(12, 40):
             if self.has_lunch_report_sent: return signals
             self.has_lunch_report_sent = True
 
             dedup_key = f"MIDDAY_SCREENING:{today_str}:1230"
-            # Notifier 내부 캐시가 아니라, 여기서 먼저 확인하고 로직을 태우는게 효율적일 수 있으나
-            # Notifier에 로직을 위임하려면 일단 계산 후 보내야 함.
-            # 하지만 계산 비용이 크므로, 로컬 플래그 대신 Notifier의 캐시를 확인하는게 좋지만 Notifier는 private함.
-            # 따라서 기존처럼 로컬 플래그를 쓰되, Notifier의 dedup도 활용.
-            
-            # 여기서는 로컬 플래그 대신 DB나 메모리 상태를 확인하여 중복 실행 방지
-            # (간단하게 Notifier 전송 시점에 처리)
             
             try:
                 top_volume_stocks_raw = self.broker.get_realtime_transaction_ranks(top_n=100)
@@ -230,13 +269,13 @@ class ClosingPriceStrategy(BaseStrategy):
                             sector = stock.get('sector', '-')
                             fields.append({
                                 "name": f"{i+1}위: {stock['name']} ({stock['ticker']})",
-                                "value": f"**{stock['score']}점** | {stock['reason']}\n🏢 {sector} | 💰 {tv_billion:,.0f}억",
+                                "value": f"**{stock['score']}점 ({stock.get('grade', '')})** | {stock['reason']}\n🏢 {sector} | 💰 {tv_billion:,.0f}억",
                                 "inline": False
                             })
                         
                         embed = {
-                            "title": f"🍱 점심 중간 점검 (12:30)",
-                            "description": "**[Plan B] 오후장 매수 참고용**\n현재 시점 1,000억 클럽/주도주 현황입니다.",
+                            "title": f"🍱 Nomad V3 점심 점검 (12:30)",
+                            "description": "**오후장 관전용**\nNomad Score V3 기준 상위 종목",
                             "color": 16776960, # 노란색
                             "fields": fields
                         }
@@ -244,15 +283,12 @@ class ClosingPriceStrategy(BaseStrategy):
             except Exception as e:
                 logger.error(f"점심 스크리닝 오류: {e}")
 
-        # ⏰ [15:03] 종가 스크리닝 (Dedup Key 사용)
+        # ⏰ [15:03] 종가 스크리닝 (Nomad V3 적용)
         if self.strategy_config.webhook_time <= now.time() < self.strategy_config.buy_start_time:
             dedup_key = f"CLOSE_TOP3:{today_str}:1503"
             
-            # 이미 전송했는지 확인 (로컬 캐시) -> API 호출 절약
-            # 하지만 정확한 Dedup을 위해 매번 실행하되 Notifier에서 막는 방식도 가능.
-            # 여기서는 비용 절감을 위해 self.top_stocks_today가 비어있을 때만 실행
             if not self.top_stocks_today:
-                logger.info(f"[{self.name}] ===== 15:03 종가 배팅 스크리닝 =====")
+                logger.info(f"[{self.name}] ===== 15:03 Nomad V3 Screening =====")
                 try:
                     top_volume_stocks_raw = self.broker.get_realtime_transaction_ranks(top_n=100)
                     if top_volume_stocks_raw:
@@ -261,8 +297,8 @@ class ClosingPriceStrategy(BaseStrategy):
                         
                         if screened_stocks:
                             self.top_stocks_today = screened_stocks
-                            selection_type = self.top_stocks_today[0].get('selection_type', '알수없음')
-                            self._save_screening_results() # DB 및 파일 저장
+                            selection_type = self.top_stocks_today[0].get('selection_type', 'Nomad V3')
+                            self._save_screening_results()
 
                             # 웹훅 발송
                             fields = []
@@ -270,27 +306,27 @@ class ClosingPriceStrategy(BaseStrategy):
                                 rank_emoji = '🥇' if i==0 else '🥈' if i==1 else '🥉'
                                 tv_billion = stock['trading_value'] / 100_000_000
                                 sector = stock.get('sector', '-')
+                                grade = stock.get('grade', '')
                                 
                                 fields.append({
                                     "name": f"{rank_emoji} {i+1}위: {stock['name']} ({stock['ticker']})",
                                     "value": (
-                                        f"**점수: {stock['score']}점**\n"
+                                        f"**{stock['score']}점 ({grade})**\n"
                                         f"└ {stock['reason']}\n"
-                                        f"🏢 업종: {sector} | 💰 {tv_billion:,.0f}억\n"
-                                        f"💵 현재가: {stock['price']:,.0f}원"
+                                        f"🏢 {sector} | 💰 {tv_billion:,.0f}억 | 💵 {stock['price']:,.0f}원"
                                     ),
                                     "inline": False
                                 })
                             
                             embed = {
-                                "title": f"🐫 유목민 1,000억 클럽 TOP3",
-                                "description": f"**유형: {selection_type}**\n시장추세 반영 완료\n⏰ 15:15 1위 매수 예정",
-                                "color": 16705372,
+                                "title": f"🐳 Nomad V3 Whale Radar",
+                                "description": f"**유형: {selection_type}**\n시장추세: {self.logic.get_market_trend().upper()}\n⏰ 15:15 1위 매수 예정",
+                                "color": 0xFFD700, # Gold
                                 "fields": fields
                             }
-                            self.notifier.send_alert("종가매매 후보 알림", embed=embed, dedup_key=dedup_key)
+                            self.notifier.send_alert("Nomad V3 Signal", embed=embed, dedup_key=dedup_key)
                         else:
-                            msg = "🚫 [유목민 전략] 조건 만족 종목 없음"
+                            msg = "🚫 [Nomad V3] 조건 만족 종목(A-Class 이상) 없음"
                             self.notifier.send_alert(msg, level='info', dedup_key=dedup_key)
                 except Exception as e:
                     logger.error(f"스크리닝 오류: {e}", exc_info=True)
@@ -299,8 +335,6 @@ class ClosingPriceStrategy(BaseStrategy):
         # 15:15 매수 (Config 매수 비율 적용)
         if self.strategy_config.buy_start_time <= now.time() <= self.strategy_config.buy_end_time and not self.has_bought_today:
             
-            # [정책 확인] intraday_over_closing 정책일 경우, 포지션이 있으면 스킵
-            # 하지만 이는 OrderManager 레벨에서 처리하는게 더 좋지만, 여기서 미리 확인하여 로그를 남김
             policy = self.global_config.get('policy', {})
             priority = policy.get('position_priority', 'closing_over_intraday')
             
@@ -314,10 +348,12 @@ class ClosingPriceStrategy(BaseStrategy):
             self.has_bought_today = True
             top_stock = self.top_stocks_today[0]
             
+            # S-Class/A-Class 필터 적용? 
+            # Logic returns only S or A class (>=80). So top 1 is safe.
+            
             avail_cash = portfolio.get_cash()
             price = self.broker.get_current_price(top_stock['ticker']) or top_stock['price']
             
-            # [변경] 공통 매수 수량 계산 메서드 사용 (Config 비율 적용)
             qty = self.calculate_buy_quantity(price, avail_cash)
             
             if qty > 0:

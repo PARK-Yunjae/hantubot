@@ -35,8 +35,17 @@ class QtLogHandler(logging.Handler):
         self.emitter = self.Emitter()
 
     def emit(self, record):
-        msg = self.format(record)
-        self.emitter.log_signal.emit(msg)
+        try:
+            msg = self.format(record)
+            self.emitter.log_signal.emit(msg)
+        except Exception:
+            # logging 모듈 내부에서 포맷팅 오류 발생 시(예: pykrx 버그), 
+            # 원본 메시지를 문자열로 변환하여 출력하고 크래시 방지
+            try:
+                msg = str(record.msg)
+                self.emitter.log_signal.emit(f"[Log Format Error] {msg}")
+            except:
+                self.handleError(record)
 
 # --- Engine Worker ---
 class EngineWorker(QObject):

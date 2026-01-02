@@ -2,6 +2,8 @@
 시장 데이터 및 뉴스 수집 모듈
 """
 import time
+import json
+import requests
 from typing import List, Dict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -26,8 +28,12 @@ def collect_market_data(run_date: str, db: StudyDatabase) -> List[Dict]:
     
     try:
         # pykrx로 전체 종목 조회
-        df_all = stock.get_market_ohlcv_by_ticker(run_date, market="ALL")
-        
+        try:
+            df_all = stock.get_market_ohlcv_by_ticker(run_date, market="ALL")
+        except (requests.exceptions.JSONDecodeError, json.JSONDecodeError):
+            logger.warning("KRX 서버로부터 유효한 데이터를 받지 못했습니다. (JSON Decode Error) - 공부 단계를 건너뜁니다.")
+            return candidates
+
         if df_all.empty:
             logger.warning("No market data available for today")
             return candidates

@@ -43,7 +43,7 @@ class KisApi:
             "appsecret": self._APP_SECRET,
         }
         try:
-            res = self._session.post(url, headers=headers, data=json.dumps(body), timeout=10)
+            res = self._session.post(url, headers=headers, json=body, timeout=10)
             res.raise_for_status()
             token_data = res.json()
             
@@ -74,7 +74,7 @@ class KisApi:
             "appsecret": self._APP_SECRET,
         }
         try:
-            res = self._session.post(url, headers=headers, data=json.dumps(data), timeout=10)
+            res = self._session.post(url, headers=headers, json=data, timeout=10)
             res.raise_for_status()
             return res.json().get("HASH", "")
         except requests.exceptions.RequestException as e:
@@ -86,6 +86,8 @@ class KisApi:
         self._ensure_token()
         return self._token_info.get('access_token', '')
 
+    DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+
     def _get_headers(self, tr_id: str, hashkey: Optional[str] = None) -> Dict[str, str]:
         """API 요청을 위한 표준 헤더를 생성합니다."""
         headers = {
@@ -95,7 +97,7 @@ class KisApi:
             "appsecret": self._APP_SECRET,
             "tr_id": tr_id,
             "custtype": "P",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            "User-Agent": self.DEFAULT_USER_AGENT
         }
         if hashkey:
             headers["hashkey"] = hashkey
@@ -112,7 +114,7 @@ class KisApi:
                 if method.upper() == 'GET':
                     resp = self._session.get(full_url, headers=headers, params=params, timeout=10)
                 elif method.upper() == 'POST':
-                    resp = self._session.post(full_url, headers=headers, data=json.dumps(body), timeout=10)
+                    resp = self._session.post(full_url, headers=headers, json=body, timeout=10)
                 else:
                     raise ValueError("Unsupported HTTP method")
 

@@ -230,7 +230,7 @@ class KisTrading:
 
     def get_open_orders(self) -> list:
         """미체결 내역을 조회합니다."""
-        url_path = "/uapi/domestic-stock/v1/trading/inquire-nccs"
+        url_path = "/uapi/domestic-stock/v1/trading/inquire-ps-amount"
         tr_id = "TTTC8003R" if not self.api.IS_MOCK else "VTTC8003R"
         
         params = {

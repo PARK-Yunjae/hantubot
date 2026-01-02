@@ -167,6 +167,10 @@ class VolumeSpikeStrategy(BaseStrategy):
                         minute_data = self.broker.get_intraday_minute_data(symbol)
                         if not minute_data: continue
                         
+                        if not isinstance(minute_data, list):
+                            # logger.debug(f"[{self.name}] 분봉 데이터 형식 오류 ({symbol}): {type(minute_data)} - {minute_data}")
+                            continue
+
                         try:
                             # 최근 1분 거래대금
                             current_1m_value = float(minute_data[0].get('acml_tr_pbmn', 0))
@@ -257,7 +261,7 @@ class VolumeSpikeStrategy(BaseStrategy):
                             break # 한 번에 하나만
                             
                         except Exception as e:
-                            logger.error(f"매수 로직 상세 오류: {e}")
+                            logger.error(f"매수 로직 상세 오류 ({symbol}): {type(e).__name__} - {e}")
                             continue
 
         except Exception as e:
