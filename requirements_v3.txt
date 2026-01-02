@@ -7,3 +7,5 @@ mojito-python
 pyyaml
 python-dotenv
 ta
+beautifulsoup4
+lxml

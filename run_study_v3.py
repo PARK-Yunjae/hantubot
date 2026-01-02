@@ -88,6 +88,8 @@ def run_study():
             logger.info("No stocks met the criteria today.")
             
     except Exception as e:
+        import traceback
+        traceback.print_exc() # Print to stdout for GitHub Actions logs
         logger.error(f"Critical Error in run_study: {e}", exc_info=True)
         sys.exit(1)
 
